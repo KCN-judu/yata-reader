@@ -1,0 +1,22 @@
+# OS and editor droppings
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Rust build output
+target/
+
+# Python glue lives only in scripts/ (ADR-0013 of the main repository); its cache is not source
+scripts/__pycache__/
+
+# Local research: notes on how the game is read, kept off the public repository (ADR-0001)
+research/
+
+# Recordings and exports of a real account: personal data, never committed (ADR-0001)
+recordings/
+*.yata-export.json
+
+# Agent tooling and local working notes, never committed
+CLAUDE.md
+.claude/

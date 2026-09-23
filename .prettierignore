@@ -1,0 +1,6 @@
+# Only Markdown is formatted by Prettier; everything else has its own formatter.
+target/
+research/
+recordings/
+.claude/
+**/node_modules/

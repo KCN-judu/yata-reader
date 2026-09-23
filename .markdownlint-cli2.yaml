@@ -1,0 +1,24 @@
+config:
+  default: true
+  # Prettier wraps prose at 80; a longer line is an unwrappable span (a URL, a long code span).
+  MD013:
+    line_length: 120
+    tables: false
+    code_blocks: false
+    headings: false
+  MD040: true
+  MD004:
+    style: dash
+  MD033:
+    allowed_elements: [br, kbd, sup, sub, details, summary]
+  MD024:
+    siblings_only: true
+  # Off: decision records number their rules continuously across subsections, so that
+  # "rule 10" stays a stable reference; the rule would restart each list at 1.
+  MD029: false
+ignores:
+  - ".claude/**"
+  - "research/**"
+  - "recordings/**"
+  - "target/**"
+  - "**/node_modules/**"

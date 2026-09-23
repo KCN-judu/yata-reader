@@ -1,0 +1,13 @@
+# Tooling configuration only. Python is glue in scripts/ (ADR-0013); nothing here is shipped.
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+include = ["scripts/**/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+files = ["scripts"]
