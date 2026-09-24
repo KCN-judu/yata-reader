@@ -36,5 +36,16 @@ jobs:
           python-version-file: .python-version
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # A CPython of the layout the reader reads, for the test that reads a real process from
+      # outside (crates/yata-reader/tests/real_cpython.rs); it does not replace the tooling Python.
+      - uses: actions/setup-python@v7
+        id: cpython311
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.11"
+          update-environment: false
+      - if: runner.os == 'Windows'
+        shell: bash
+        run: echo "YATA_TEST_PYTHON=${{ steps.cpython311.outputs.python-path }}" >> "$GITHUB_ENV"
       - run: python scripts/preflight.py rust-ci
 
