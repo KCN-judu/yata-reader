@@ -1,0 +1,18 @@
+[package]
+name = "yata-reader"
+description = "Reads the player's own data from the running game, from outside and read-only, for Yata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+prost = { workspace = true }
+yata-protocol = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+interprocess = { workspace = true }
+
+[lints]
+workspace = true

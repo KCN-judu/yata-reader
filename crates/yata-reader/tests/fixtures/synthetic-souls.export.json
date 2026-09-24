@@ -1,0 +1,425 @@
+{
+  "protocolVersion": {
+    "major": 1
+  },
+  "probeBuildId": "yata-reader synthetic-fixture",
+  "engine": "cpython-3.11",
+  "channel": "CHANNEL_DESKTOP_MEMORY",
+  "results": [
+    {
+      "scope": "SCOPE_SOULS",
+      "coverage": "COVERAGE_PARTIAL",
+      "fieldEvidence": [
+        {
+          "field": "SoulRecord",
+          "evidence": "EVIDENCE_INHERITED",
+          "basis": "prior tool: a dict holding at least two of base_rindex, rattr, single_attr, others, sattr, where base_rindex and others are ints, rattr is a list, single_attr is an int or None, sattr is a str, and base_r is a number"
+        }
+      ],
+      "stats": {
+        "regionsScanned": "1",
+        "bytesScanned": "4688",
+        "candidatesRejected": "1"
+      },
+      "souls": {
+        "souls": [
+          {
+            "observed": {
+              "typeName": "dict",
+              "containerKey": {
+                "text": "000000000000000000000001"
+              },
+              "entries": [
+                {
+                  "key": {
+                    "text": "base_rindex"
+                  },
+                  "value": {
+                    "integer": "1"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "rattr"
+                  },
+                  "value": {
+                    "sequence": {
+                      "kind": "SEQUENCE_KIND_LIST",
+                      "items": [
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "1"
+                              },
+                              {
+                                "float": 0.0
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        }
+                      ],
+                      "length": "1"
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "text": "single_attr"
+                  },
+                  "value": {
+                    "null": {}
+                  }
+                },
+                {
+                  "key": {
+                    "text": "others"
+                  },
+                  "value": {
+                    "integer": "1099511627777"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "sattr"
+                  },
+                  "value": {
+                    "text": "synthetic-1"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "base_r"
+                  },
+                  "value": {
+                    "float": 10.0
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "observed": {
+              "typeName": "dict",
+              "containerKey": {
+                "text": "000000000000000000000002"
+              },
+              "entries": [
+                {
+                  "key": {
+                    "text": "base_rindex"
+                  },
+                  "value": {
+                    "integer": "2"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "rattr"
+                  },
+                  "value": {
+                    "sequence": {
+                      "kind": "SEQUENCE_KIND_LIST",
+                      "items": [
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "1"
+                              },
+                              {
+                                "float": 0.0
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        },
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "2"
+                              },
+                              {
+                                "float": 0.5
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        }
+                      ],
+                      "length": "2"
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "text": "single_attr"
+                  },
+                  "value": {
+                    "integer": "7"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "others"
+                  },
+                  "value": {
+                    "integer": "1099511627778"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "sattr"
+                  },
+                  "value": {
+                    "text": "synthetic-2"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "base_r"
+                  },
+                  "value": {
+                    "float": 20.0
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "observed": {
+              "typeName": "dict",
+              "containerKey": {
+                "text": "000000000000000000000003"
+              },
+              "entries": [
+                {
+                  "key": {
+                    "text": "base_rindex"
+                  },
+                  "value": {
+                    "integer": "3"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "rattr"
+                  },
+                  "value": {
+                    "sequence": {
+                      "kind": "SEQUENCE_KIND_LIST",
+                      "items": [
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "1"
+                              },
+                              {
+                                "float": 0.0
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        },
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "2"
+                              },
+                              {
+                                "float": 0.5
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        },
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "3"
+                              },
+                              {
+                                "float": 1.0
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        }
+                      ],
+                      "length": "3"
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "text": "single_attr"
+                  },
+                  "value": {
+                    "null": {}
+                  }
+                },
+                {
+                  "key": {
+                    "text": "others"
+                  },
+                  "value": {
+                    "integer": "1099511627779"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "sattr"
+                  },
+                  "value": {
+                    "text": "synthetic-3"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "base_r"
+                  },
+                  "value": {
+                    "float": 30.0
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "observed": {
+              "typeName": "dict",
+              "entries": [
+                {
+                  "key": {
+                    "text": "base_rindex"
+                  },
+                  "value": {
+                    "integer": "4"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "rattr"
+                  },
+                  "value": {
+                    "sequence": {
+                      "kind": "SEQUENCE_KIND_LIST",
+                      "items": [
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "1"
+                              },
+                              {
+                                "float": 0.0
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        },
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "2"
+                              },
+                              {
+                                "float": 0.5
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        },
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "3"
+                              },
+                              {
+                                "float": 1.0
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        },
+                        {
+                          "sequence": {
+                            "kind": "SEQUENCE_KIND_TUPLE",
+                            "items": [
+                              {
+                                "integer": "4"
+                              },
+                              {
+                                "float": 1.5
+                              }
+                            ],
+                            "length": "2"
+                          }
+                        }
+                      ],
+                      "length": "4"
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "text": "single_attr"
+                  },
+                  "value": {
+                    "integer": "9"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "others"
+                  },
+                  "value": {
+                    "integer": "1099511627780"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "sattr"
+                  },
+                  "value": {
+                    "text": "synthetic-4"
+                  }
+                },
+                {
+                  "key": {
+                    "text": "base_r"
+                  },
+                  "value": {
+                    "float": 40.0
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "capturedAt": "2026-09-25T00:00:00Z",
+  "target": {
+    "pid": 4242,
+    "imageName": "synthetic.exe",
+    "pointerBits": 64
+  }
+}

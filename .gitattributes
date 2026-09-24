@@ -1,3 +1,6 @@
 # Every text file is checked out with LF on every platform: golden tests compare bytes, the
 # Markdown formatter and linters assume LF, and Windows must match the Linux CI byte for byte.
 * text=auto eol=lf
+
+# Recordings are frame streams, compared byte for byte
+*.frames binary

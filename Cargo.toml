@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/yata-reader"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/KCN-judu/yata-reader"
+
+[workspace.dependencies]
+# The frame codec and the probe schema, at a pinned revision of the main repository: the
+# contract is the consumer's (ADR-0001; the main repository's ADR-0006, rule 5).
+yata-protocol = { git = "https://github.com/KCN-judu/yata", rev = "74a57b54cfe539293f5ea3ce399fa3627177f99a" }
+# the client end of the daemon's named pipe, on Windows only
+interprocess = "2.4"
+prost = "0.14"
+
+[workspace.lints.rust]
+# ADR-0002: denied everywhere, allowed only in the modules scripts/preflight.py names
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
