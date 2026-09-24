@@ -37,7 +37,9 @@ LENGTH_ALLOWLIST: dict[str, tuple[int, str]] = {}
 GENERATED = ("/gen/", "/generated/")
 
 # ADR-0002: the only files that may allow `unsafe`, each with its reason.
-UNSAFE_MODULES: dict[str, str] = {}
+UNSAFE_MODULES: dict[str, str] = {
+    "crates/yata-reader/src/platform/windows.rs": "the Win32 calls that list, query, open, and read processes",
+}
 UNSAFE_USE = re.compile(r"\bunsafe\s*(\{|fn\b|impl\b|trait\b|extern\b)|allow\s*\(\s*unsafe_code\s*\)")
 
 # R1 (reader-security.md in the main repository): APIs and commands that change the system.
