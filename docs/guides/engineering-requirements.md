@@ -61,6 +61,9 @@ verification contract, and a different rule for `unsafe`.
 
 ## Commits
 
+- Commit messages follow Conventional Commits 1.0.0 (the main repository's
+  ADR-0021). This repository's scopes name its own parts; `docs` commits take
+  the folder under `docs/`.
 - One logical change per commit, at a point where the tree builds and the fast
   checks pass.
 - A change to a record goes in the same commit as the change it records.
