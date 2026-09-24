@@ -64,6 +64,9 @@ verification contract, and a different rule for `unsafe`.
 - One logical change per commit, at a point where the tree builds and the fast
   checks pass.
 - A change to a record goes in the same commit as the change it records.
+- Commits and pull requests carry no agent attribution: no `Co-Authored-By`
+  trailer or "Generated with" line naming an agent or model (the main
+  repository's ADR-0020).
 
 ## Publication
 

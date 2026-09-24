@@ -43,6 +43,8 @@ here, never restated (ADR-0001).
 
 - [changes/unreleased/2026-09-repository-tooling.md](changes/unreleased/2026-09-repository-tooling.md)
   — records and tooling
+- [changes/unreleased/2026-09-history-rewrite.md](changes/unreleased/2026-09-history-rewrite.md)
+  — `main` rewritten to remove agent attribution; reset old clones
 
 ## Local only — not published
 
