@@ -27,6 +27,9 @@ here, never restated (ADR-0001).
 - [decisions/0002-unsafe-confined-to-named-modules.md](decisions/0002-unsafe-confined-to-named-modules.md)
   — `unsafe` is denied except in named platform modules, each block with a
   stated invariant
+- [decisions/0003-read-the-runtime-object-layout.md](decisions/0003-read-the-runtime-object-layout.md)
+  — the desktop channel reads the game's embedded runtime by its public object
+  layout, checked at attach, and reports records verbatim
 
 ## Guides — `guides/`
 
@@ -41,6 +44,8 @@ here, never restated (ADR-0001).
 
 ## Changes — `changes/`
 
+- [changes/unreleased/2026-09-desktop-reader.md](changes/unreleased/2026-09-desktop-reader.md)
+  — the desktop channel, the pipe session, and export mode
 - [changes/unreleased/2026-09-repository-tooling.md](changes/unreleased/2026-09-repository-tooling.md)
   — records and tooling
 - [changes/unreleased/2026-09-history-rewrite.md](changes/unreleased/2026-09-history-rewrite.md)
