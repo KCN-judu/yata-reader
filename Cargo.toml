@@ -12,7 +12,7 @@ repository = "https://github.com/KCN-judu/yata-reader"
 [workspace.dependencies]
 # The frame codec and the probe schema, at a pinned revision of the main repository: the
 # contract is the consumer's (ADR-0001; the main repository's ADR-0006, rule 5).
-yata-protocol = { git = "https://github.com/KCN-judu/yata", rev = "74a57b54cfe539293f5ea3ce399fa3627177f99a" }
+yata-protocol = { git = "https://github.com/KCN-judu/yata", rev = "c6c306d0c8d2e5db273efa3a400f39c38eff08a6" }
 # the client end of the daemon's named pipe, on Windows only
 interprocess = "2.4"
 prost = "0.14"
