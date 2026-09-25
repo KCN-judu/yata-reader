@@ -6,14 +6,16 @@
 //! [`IMAGE_NAMES`] are the candidates: none is `probe.not_found`, more than one is
 //! `probe.ambiguous_target` with every candidate listed, and only exactly one is chosen.
 //!
-//! Opening classifies the operating system's answer: access denied to an unelevated reader is
-//! `probe.elevation_required`, to an elevated one `probe.access_denied`; a pid that is gone is
-//! `probe.process_exited`; a 32-bit target is an unsupported environment. The target's memory
-//! then goes to [`crate::layout`], which checks its layout before anything is read.
+//! Opening classifies the operating system's answer: access denied to a reader known to be
+//! unelevated is `probe.elevation_required`, to any other reader `probe.access_denied`; a pid that
+//! is gone is `probe.process_exited`; a 32-bit target is an unsupported environment. The target's
+//! memory then goes to [`crate::layout`], which checks its layout before anything is read.
 
-use yata_protocol::probe::{TargetProcess, code, exit};
+use std::num::NonZeroU32;
 
-use crate::layout::cpython::LayoutError;
+use yata_protocol::probe::{PointerWidth, TargetProcess};
+
+use crate::session::{SessionFailure, SessionReason, Target};
 
 /// The game's executable names, from the prior tool: a hypothesis, with no recording of this
 /// project behind it yet. A name the game does not use finds nothing and is reported as such.
@@ -31,63 +33,49 @@ pub struct Candidate {
     pub image_name: String,
 }
 
+/// Whether this reader runs elevated, as far as the system says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Elevation {
+    Elevated,
+    Unelevated,
+    /// The system would not say.
+    Unknown,
+}
+
 /// Why the reader could not attach.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachError {
-    /// No candidate, or no process with the given pid.
-    NotFound { pid: u32 },
+    /// No process has one of the game's names.
+    NoGame,
+    /// No process has the pid the daemon named.
+    NoPid { pid: NonZeroU32 },
     /// More than one candidate.
     Ambiguous { candidates: Vec<Candidate> },
-    /// The game refused an unelevated reader.
+    /// The game refused a reader known to be unelevated.
     ElevationRequired,
     /// The game refused an elevated reader.
     AccessDenied,
+    /// The game refused a reader that cannot tell whether it is elevated. Elevating is not
+    /// suggested: it may not be the cause.
+    DeniedUnknownElevation,
     /// The process was gone by the time it was opened.
     Exited,
     /// A host or a target this reader has no strategy for.
     Unsupported { reason: String },
-    /// The target's memory is not the layout this reader reads.
-    Layout(LayoutError),
-    /// Any other operating-system failure.
+    /// Any other operating-system failure, with the system's error number when it gave one.
     Os {
-        os_error: i32,
+        os_error: Option<i32>,
         context: &'static str,
     },
 }
 
 impl AttachError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            AttachError::NotFound { .. } => code::NOT_FOUND,
-            AttachError::Ambiguous { .. } => code::AMBIGUOUS_TARGET,
-            AttachError::ElevationRequired => code::ELEVATION_REQUIRED,
-            AttachError::AccessDenied => code::ACCESS_DENIED,
-            AttachError::Exited => code::PROCESS_EXITED,
-            AttachError::Unsupported { .. } => code::UNSUPPORTED_ENVIRONMENT,
-            AttachError::Layout(_) => code::LAYOUT_MISMATCH,
-            AttachError::Os { .. } => code::INTERNAL,
-        }
-    }
-
-    /// The reader's exit code for this failure (`probe-protocol.md`, "Frame").
-    pub fn exit(&self) -> u8 {
-        match self {
-            AttachError::NotFound { .. }
-            | AttachError::Ambiguous { .. }
-            | AttachError::AccessDenied
-            | AttachError::Exited => exit::NOT_ATTACHED,
-            AttachError::ElevationRequired => exit::ELEVATION_REQUIRED,
-            AttachError::Unsupported { .. } | AttachError::Layout(_) => exit::NO_STRATEGY,
-            AttachError::Os { .. } => exit::INTERNAL,
-        }
-    }
-
     pub fn message(&self) -> String {
         match self {
-            AttachError::NotFound { pid: 0 } => {
+            AttachError::NoGame => {
                 format!("no running process is named {}", IMAGE_NAMES.join(" or "))
             }
-            AttachError::NotFound { pid } => format!("no process has pid {pid}"),
+            AttachError::NoPid { pid } => format!("no process has pid {pid}"),
             AttachError::Ambiguous { candidates } => {
                 format!("{} processes match; choose one by pid", candidates.len())
             }
@@ -95,22 +83,57 @@ impl AttachError {
                 "the game refused access; it runs elevated and the reader does not".to_owned()
             }
             AttachError::AccessDenied => "the game refused access to an elevated reader".to_owned(),
+            AttachError::DeniedUnknownElevation => "the game refused access, and the system would \
+                                                    not say whether this reader is elevated"
+                .to_owned(),
             AttachError::Exited => "the process exited before it could be opened".to_owned(),
             AttachError::Unsupported { reason } => reason.clone(),
-            AttachError::Layout(e) => format!("the game's memory is not a known layout: {e:?}"),
-            AttachError::Os { os_error, context } => {
-                format!("{context} failed with system error {os_error}")
-            }
+            AttachError::Os {
+                os_error: Some(e),
+                context,
+            } => format!("{context} failed with system error {e}"),
+            AttachError::Os {
+                os_error: None,
+                context,
+            } => format!("{context} failed, and the system gave no error number"),
         }
     }
 
-    /// The os error number the failure came from; 0 when there is none.
-    pub fn os_error(&self) -> u32 {
-        match self {
-            AttachError::ElevationRequired | AttachError::AccessDenied => OS_ACCESS_DENIED as u32,
-            AttachError::Exited => OS_INVALID_PARAMETER as u32,
-            AttachError::Os { os_error, .. } => u32::try_from(*os_error).unwrap_or(0),
-            _ => 0,
+    /// The operating-system error the failure came from, when there is one.
+    pub fn os_error(&self) -> Option<NonZeroU32> {
+        let raw = match self {
+            AttachError::ElevationRequired
+            | AttachError::AccessDenied
+            | AttachError::DeniedUnknownElevation => Some(OS_ACCESS_DENIED),
+            AttachError::Exited => Some(OS_INVALID_PARAMETER),
+            AttachError::Os { os_error, .. } => *os_error,
+            AttachError::NoGame
+            | AttachError::NoPid { .. }
+            | AttachError::Ambiguous { .. }
+            | AttachError::Unsupported { .. } => None,
+        };
+        raw.and_then(|e| u32::try_from(e).ok())
+            .and_then(NonZeroU32::new)
+    }
+
+    /// The failure the daemon is told about, which ends the session.
+    pub fn failure(&self) -> SessionFailure {
+        let reason = match self {
+            AttachError::NoGame | AttachError::NoPid { .. } => SessionReason::NotFound,
+            AttachError::Ambiguous { candidates } => SessionReason::Ambiguous {
+                candidates: candidates.iter().map(target_of).collect(),
+            },
+            AttachError::ElevationRequired => SessionReason::ElevationRequired,
+            AttachError::AccessDenied | AttachError::DeniedUnknownElevation => {
+                SessionReason::AccessDenied
+            }
+            AttachError::Exited => SessionReason::ProcessExited,
+            AttachError::Unsupported { .. } => SessionReason::UnsupportedEnvironment,
+            AttachError::Os { .. } => SessionReason::Internal,
+        };
+        SessionFailure {
+            os_error: self.os_error(),
+            ..SessionFailure::new(reason, self.message())
         }
     }
 }
@@ -122,14 +145,14 @@ pub fn is_game(image_name: &str) -> bool {
         .any(|n| n.eq_ignore_ascii_case(image_name))
 }
 
-/// Choose the target among all processes: the one with `pid`, or the one game process.
-pub fn select(all: &[Candidate], pid: u32) -> Result<Candidate, AttachError> {
-    if pid != 0 {
+/// Choose the target among all processes: the one with the pid, or the one game process.
+pub fn select(all: &[Candidate], target: Target) -> Result<Candidate, AttachError> {
+    if let Target::Pid(pid) = target {
         return all
             .iter()
-            .find(|c| c.pid == pid)
+            .find(|c| c.pid == pid.get())
             .cloned()
-            .ok_or(AttachError::NotFound { pid });
+            .ok_or(AttachError::NoPid { pid });
     }
     let mut games: Vec<Candidate> = all
         .iter()
@@ -137,20 +160,21 @@ pub fn select(all: &[Candidate], pid: u32) -> Result<Candidate, AttachError> {
         .cloned()
         .collect();
     games.sort_by_key(|c| c.pid);
-    match games.len() {
-        0 => Err(AttachError::NotFound { pid: 0 }),
-        1 => Ok(games.remove(0)),
+    match games.as_slice() {
+        [] => Err(AttachError::NoGame),
+        [one] => Ok(one.clone()),
         _ => Err(AttachError::Ambiguous { candidates: games }),
     }
 }
 
-/// What an `OpenProcess` failure means, given whether this reader is elevated.
-pub fn classify_open(os_error: i32, elevated: bool) -> AttachError {
-    match os_error {
-        OS_ACCESS_DENIED if elevated => AttachError::AccessDenied,
-        OS_ACCESS_DENIED => AttachError::ElevationRequired,
-        OS_INVALID_PARAMETER => AttachError::Exited,
-        _ => AttachError::Os {
+/// What an `OpenProcess` failure means, given what is known of this reader's elevation.
+pub fn classify_open(os_error: Option<i32>, elevation: Elevation) -> AttachError {
+    match (os_error, elevation) {
+        (Some(OS_ACCESS_DENIED), Elevation::Unelevated) => AttachError::ElevationRequired,
+        (Some(OS_ACCESS_DENIED), Elevation::Elevated) => AttachError::AccessDenied,
+        (Some(OS_ACCESS_DENIED), Elevation::Unknown) => AttachError::DeniedUnknownElevation,
+        (Some(OS_INVALID_PARAMETER), _) => AttachError::Exited,
+        (os_error, _) => AttachError::Os {
             os_error,
             context: "opening the game",
         },
@@ -162,21 +186,31 @@ pub fn target_of(c: &Candidate) -> TargetProcess {
     let t = TargetProcess {
         pid: c.pid,
         image_name: c.image_name.clone(),
-        parent_pid: c.parent_pid,
+        parent_pid: Some(c.parent_pid),
         ..TargetProcess::default()
     };
     #[cfg(windows)]
     {
-        let f = crate::platform::windows::facts(c.pid);
+        use crate::platform::windows::{self, Bitness};
+        let f = windows::facts(c.pid);
         TargetProcess {
-            pointer_bits: f.pointer_bits.unwrap_or(0),
-            created_unix_ms: f.created_unix_ms.unwrap_or(0),
-            session_id: f.session_id.unwrap_or(0),
+            pointer_width: f.bitness.map(|b| {
+                match b {
+                    Bitness::Bits32 => PointerWidth::PointerWidth32,
+                    Bitness::Bits64 => PointerWidth::PointerWidth64,
+                }
+                .into()
+            }),
+            created_unix_ms: f.created_unix_ms,
+            session_id: f.session_id,
             ..t
         }
     }
     #[cfg(not(windows))]
-    t
+    {
+        let _: Option<PointerWidth> = None;
+        t
+    }
 }
 
 #[cfg(windows)]
@@ -184,15 +218,16 @@ pub use live::{GameMemory, attach, candidates};
 
 #[cfg(windows)]
 mod live {
-    use super::{AttachError, Candidate, classify_open, select};
+    use super::{AttachError, Candidate, Elevation, classify_open, select};
     use crate::layout::memory::{Memory, Region, Unreadable};
-    use crate::platform::windows::{self, Process};
+    use crate::platform::windows::{self, Bitness, Process};
+    use crate::session::Target;
 
     /// Every process, as candidates.
     pub fn candidates() -> Result<Vec<Candidate>, AttachError> {
         windows::processes()
             .map_err(|e| AttachError::Os {
-                os_error: e.raw_os_error().unwrap_or(0),
+                os_error: e.raw_os_error(),
                 context: "listing processes",
             })
             .map(|list| {
@@ -226,17 +261,20 @@ mod live {
     }
 
     /// Choose the target and open it.
-    pub fn attach(pid: u32) -> Result<(Candidate, GameMemory), AttachError> {
-        let chosen = select(&candidates()?, pid)?;
-        let facts = windows::facts(chosen.pid);
-        if facts.pointer_bits == Some(32) {
+    pub fn attach(target: Target) -> Result<(Candidate, GameMemory), AttachError> {
+        let chosen = select(&candidates()?, target)?;
+        if windows::facts(chosen.pid).bitness == Some(Bitness::Bits32) {
             return Err(AttachError::Unsupported {
                 reason: format!("{} is a 32-bit process", chosen.image_name),
             });
         }
         let process = windows::open(chosen.pid).map_err(|e| {
-            let elevated = windows::is_elevated().unwrap_or(false);
-            classify_open(e.raw_os_error().unwrap_or(0), elevated)
+            let elevation = match windows::is_elevated() {
+                Ok(true) => Elevation::Elevated,
+                Ok(false) => Elevation::Unelevated,
+                Err(_) => Elevation::Unknown,
+            };
+            classify_open(e.raw_os_error(), elevation)
         })?;
         let regions = process.regions();
         Ok((chosen, GameMemory { process, regions }))
@@ -245,6 +283,8 @@ mod live {
 
 #[cfg(test)]
 mod tests {
+    use yata_protocol::probe::{Exit, ProbeErrorCode};
+
     use super::*;
 
     fn c(pid: u32, name: &str) -> Candidate {
@@ -255,18 +295,24 @@ mod tests {
         }
     }
 
+    fn nonzero(n: u32) -> NonZeroU32 {
+        NonZeroU32::new(n).expect("nonzero")
+    }
+
     #[test]
     fn no_game_process_is_not_found() {
         let all = [c(4, "System"), c(10, "explorer.exe")];
-        assert_eq!(select(&all, 0), Err(AttachError::NotFound { pid: 0 }));
-        assert_eq!(AttachError::NotFound { pid: 0 }.code(), code::NOT_FOUND);
-        assert_eq!(AttachError::NotFound { pid: 0 }.exit(), exit::NOT_ATTACHED);
+        assert_eq!(select(&all, Target::Discover), Err(AttachError::NoGame));
+        let f = AttachError::NoGame.failure();
+        assert_eq!(f.reason.code(), ProbeErrorCode::NotFound);
+        assert_eq!(f.exit(), Exit::NotAttached);
+        assert_eq!(f.os_error, None);
     }
 
     #[test]
     fn one_game_process_is_chosen_whatever_its_case() {
         let all = [c(10, "explorer.exe"), c(20, "Onmyoji.EXE")];
-        assert_eq!(select(&all, 0), Ok(c(20, "Onmyoji.EXE")));
+        assert_eq!(select(&all, Target::Discover), Ok(c(20, "Onmyoji.EXE")));
     }
 
     #[test]
@@ -276,12 +322,18 @@ mod tests {
             c(10, "x.exe"),
             c(20, "onmyoji.exe"),
         ];
+        let e = select(&all, Target::Discover).expect_err("ambiguous");
         assert_eq!(
-            select(&all, 0),
-            Err(AttachError::Ambiguous {
+            e,
+            AttachError::Ambiguous {
                 candidates: vec![c(20, "onmyoji.exe"), c(30, "onmyoji_future.exe")]
-            })
+            }
         );
+        let SessionReason::Ambiguous { candidates } = e.failure().reason else {
+            panic!("ambiguous")
+        };
+        let pids: Vec<u32> = candidates.iter().map(|t| t.pid).collect();
+        assert_eq!(pids, vec![20, 30]);
     }
 
     #[test]
@@ -291,39 +343,59 @@ mod tests {
             c(30, "onmyoji.exe"),
             c(40, "renamed.exe"),
         ];
-        assert_eq!(select(&all, 30), Ok(c(30, "onmyoji.exe")));
-        assert_eq!(select(&all, 40), Ok(c(40, "renamed.exe")));
-        assert_eq!(select(&all, 99), Err(AttachError::NotFound { pid: 99 }));
+        let pid = |n| Target::Pid(nonzero(n));
+        assert_eq!(select(&all, pid(30)), Ok(c(30, "onmyoji.exe")));
+        assert_eq!(select(&all, pid(40)), Ok(c(40, "renamed.exe")));
+        assert_eq!(
+            select(&all, pid(99)),
+            Err(AttachError::NoPid { pid: nonzero(99) })
+        );
     }
 
     #[test]
-    fn access_denied_means_elevation_only_when_not_elevated() {
-        let unelevated = classify_open(OS_ACCESS_DENIED, false);
+    fn access_denied_means_elevation_only_when_known_unelevated() {
+        let unelevated = classify_open(Some(OS_ACCESS_DENIED), Elevation::Unelevated);
         assert_eq!(unelevated, AttachError::ElevationRequired);
-        assert_eq!(unelevated.code(), code::ELEVATION_REQUIRED);
-        assert_eq!(unelevated.exit(), exit::ELEVATION_REQUIRED);
-        let elevated = classify_open(OS_ACCESS_DENIED, true);
+        assert_eq!(unelevated.failure().exit(), Exit::ElevationRequired);
+        let elevated = classify_open(Some(OS_ACCESS_DENIED), Elevation::Elevated);
         assert_eq!(elevated, AttachError::AccessDenied);
-        assert_eq!(elevated.code(), code::ACCESS_DENIED);
-        assert_eq!(elevated.exit(), exit::NOT_ATTACHED);
+        assert_eq!(elevated.failure().reason, SessionReason::AccessDenied);
+        assert_eq!(elevated.failure().exit(), Exit::NotAttached);
+        // Not knowing is no reason to ask the user to elevate.
+        let unknown = classify_open(Some(OS_ACCESS_DENIED), Elevation::Unknown);
+        assert_eq!(unknown, AttachError::DeniedUnknownElevation);
+        assert_eq!(unknown.failure().reason, SessionReason::AccessDenied);
     }
 
     #[test]
     fn a_vanished_process_and_other_errors_are_told_apart() {
         assert_eq!(
-            classify_open(OS_INVALID_PARAMETER, false),
+            classify_open(Some(OS_INVALID_PARAMETER), Elevation::Unelevated),
             AttachError::Exited
         );
-        let other = classify_open(1450, false);
-        assert_eq!(other.code(), code::INTERNAL);
-        assert_eq!(other.os_error(), 1450);
+        let other = classify_open(Some(1450), Elevation::Unelevated).failure();
+        assert_eq!(other.reason, SessionReason::Internal);
+        assert_eq!(other.os_error, Some(nonzero(1450)));
+        let silent = classify_open(None, Elevation::Unelevated).failure();
+        assert_eq!(silent.os_error, None);
     }
 
     #[test]
-    fn a_layout_mismatch_has_no_read_strategy() {
-        let e = AttachError::Layout(LayoutError::DictKeys);
-        assert_eq!(e.code(), code::LAYOUT_MISMATCH);
-        assert_eq!(e.exit(), exit::NO_STRATEGY);
+    fn every_session_reason_exits_as_the_protocol_table_says() {
+        for r in [
+            SessionReason::NotFound,
+            SessionReason::Ambiguous { candidates: vec![] },
+            SessionReason::ElevationRequired,
+            SessionReason::AccessDenied,
+            SessionReason::ProcessExited,
+            SessionReason::UnsupportedEnvironment,
+            SessionReason::LayoutMismatch,
+            SessionReason::ProtocolUnsupported,
+            SessionReason::ProtocolError,
+            SessionReason::Internal,
+        ] {
+            assert_eq!(r.code().exit(), Some(r.exit()), "{r:?}");
+        }
     }
 
     #[cfg(windows)]
@@ -340,22 +412,22 @@ mod tests {
             .err()
             .expect("refused");
         assert_eq!(e.raw_os_error(), Some(OS_ACCESS_DENIED));
-        let elevated = crate::platform::windows::is_elevated().expect("known");
-        let expected = if elevated {
-            AttachError::AccessDenied
+        let (elevation, expected) = if crate::platform::windows::is_elevated().expect("known") {
+            (Elevation::Elevated, AttachError::AccessDenied)
         } else {
-            AttachError::ElevationRequired
+            (Elevation::Unelevated, AttachError::ElevationRequired)
         };
-        assert_eq!(classify_open(OS_ACCESS_DENIED, elevated), expected);
+        assert_eq!(classify_open(Some(OS_ACCESS_DENIED), elevation), expected);
     }
 
     #[cfg(windows)]
     #[test]
     fn a_pid_that_does_not_exist_is_not_found() {
         // Process ids are multiples of four, so an odd one never exists.
+        let odd = nonzero(4_000_000_001);
         assert_eq!(
-            attach(4_000_000_001).err(),
-            Some(AttachError::NotFound { pid: 4_000_000_001 })
+            attach(Target::Pid(odd)).err(),
+            Some(AttachError::NoPid { pid: odd })
         );
     }
 
@@ -366,6 +438,6 @@ mod tests {
         if all.iter().any(|p| is_game(&p.image_name)) {
             return;
         }
-        assert_eq!(attach(0).err(), Some(AttachError::NotFound { pid: 0 }));
+        assert_eq!(attach(Target::Discover).err(), Some(AttachError::NoGame));
     }
 }

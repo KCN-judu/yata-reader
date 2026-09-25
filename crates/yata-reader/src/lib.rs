@@ -33,34 +33,36 @@ pub const BUILD_ID: &str = concat!(
 /// The prefix of every pipe name the daemon creates.
 pub const PIPE_PREFIX: &str = r"\\.\pipe\yata-reader-";
 
-/// Whether a name is one the daemon creates: its prefix and 32 lowercase hexadecimal digits.
-/// Anything else is refused before the reader connects to it.
-pub fn valid_pipe_name(name: &str) -> bool {
-    name.strip_prefix(PIPE_PREFIX).is_some_and(|rest| {
-        rest.len() == 32
+/// A pipe name the daemon creates: [`PIPE_PREFIX`] and 32 lowercase hexadecimal digits. Any
+/// other name is refused before the reader connects to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeName(String);
+
+impl PipeName {
+    pub fn parse(name: &str) -> Option<PipeName> {
+        let rest = name.strip_prefix(PIPE_PREFIX)?;
+        (rest.len() == 32
             && rest
                 .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .then(|| PipeName(name.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// On a panic, send the daemon a well-formed session-level `Failed` before the reader exits with
-/// code 4 (`probe-protocol.md`, "Frame").
+/// the internal exit code (`probe-protocol.md`, "Frame").
 pub fn install_panic_report(out: session::Outgoing) {
     std::panic::set_hook(Box::new(move |info| {
-        let error = session::Failure::new(
-            yata_protocol::probe::code::INTERNAL,
+        let f = session::SessionFailure::new(
+            session::SessionReason::Internal,
             format!("the reader panicked: {info}"),
-            yata_protocol::probe::exit::INTERNAL,
-        )
-        .error();
-        let message =
-            yata_protocol::probe::probe_message::Kind::Failed(yata_protocol::probe::Failed {
-                request_id: 0,
-                error: Some(error),
-            });
-        let _ = session::send(&out, message);
-        std::process::exit(i32::from(yata_protocol::probe::exit::INTERNAL));
+        );
+        session::send_session_failure(&out, &f);
+        std::process::exit(i32::from(f.exit().code()));
     }));
 }
 
@@ -72,14 +74,17 @@ mod tests {
     fn only_the_daemons_pipe_names_are_accepted() {
         // Written out rather than built from PIPE_PREFIX, so a wrong prefix fails here.
         let good = r"\\.\pipe\yata-reader-0123456789abcdef0123456789abcdef";
-        assert!(valid_pipe_name(good));
-        assert!(!valid_pipe_name(&good.to_uppercase()));
-        assert!(!valid_pipe_name(r"\\.\pipe\other"));
-        assert!(!valid_pipe_name(&format!("{good}0")));
-        assert!(!valid_pipe_name(&format!(
-            r"\\server\pipe\yata-reader-{}",
-            "0".repeat(32)
-        )));
+        assert_eq!(
+            PipeName::parse(good).map(|p| p.as_str().to_owned()),
+            Some(good.to_owned())
+        );
+        assert_eq!(PipeName::parse(&good.to_uppercase()), None);
+        assert_eq!(PipeName::parse(r"\\.\pipe\other"), None);
+        assert_eq!(PipeName::parse(&format!("{good}0")), None);
+        assert_eq!(
+            PipeName::parse(&format!(r"\\server\pipe\yata-reader-{}", "0".repeat(32))),
+            None
+        );
     }
 
     #[test]

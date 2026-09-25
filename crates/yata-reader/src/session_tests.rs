@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use yata_protocol::probe::{
-    Cancel, Handshake, ProtocolVersion, ReadRequest, Shutdown, read_result::Records,
+    Cancel, Discover, Handshake, ProtocolVersion, ReadRequest, Shutdown, reading::Records,
 };
 
 use super::*;
@@ -14,13 +14,13 @@ use crate::layout::fixture::inventory;
 /// A backend whose read runs until it is cancelled, reporting progress as it goes, or fails
 /// attaching with a given failure.
 struct Stub {
-    attach: Result<(), Failure>,
+    attach: Result<(), SessionFailure>,
     reads: Arc<Mutex<u32>>,
     started: Arc<AtomicBool>,
 }
 
 impl Backend for Stub {
-    fn attach(&mut self, _pid: u32) -> Result<Attached, Failure> {
+    fn attach(&mut self, _target: Target) -> Result<Attached, SessionFailure> {
         self.attach.clone().map(|()| Attached {
             engine: "stub".into(),
             channel: Channel::DesktopMemory,
@@ -33,7 +33,7 @@ impl Backend for Stub {
         _scope: Scope,
         progress: &mut dyn FnMut(u64, u64),
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<ReadResult, Failure> {
+    ) -> Result<Reading, RequestFailure> {
         *self.reads.lock().expect("count") += 1;
         self.started.store(true, Ordering::SeqCst);
         let mut done = 0;
@@ -42,11 +42,11 @@ impl Backend for Stub {
             progress(done, 0);
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        Err(Failure::new(code::CANCELLED, "cancelled", 0))
+        Err(RequestFailure::new(RequestReason::Cancelled, "cancelled"))
     }
 }
 
-fn stub(attach: Result<(), Failure>) -> (Stub, Arc<Mutex<u32>>, Arc<AtomicBool>) {
+fn stub(attach: Result<(), SessionFailure>) -> (Stub, Arc<Mutex<u32>>, Arc<AtomicBool>) {
     let reads = Arc::new(Mutex::new(0));
     let started = Arc::new(AtomicBool::new(false));
     (
@@ -67,9 +67,17 @@ fn frame_of(kind: Kind) -> Vec<u8> {
 fn handshake(major: u32) -> Kind {
     Kind::Handshake(Handshake {
         version: Some(ProtocolVersion { major, minor: 0 }),
-        expected_engine: String::new(),
-        target_pid: 0,
+        expected_engine: None,
+        target: Some(handshake::Target::Discover(Discover {})),
     })
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "test helper: a failure here is the test failing"
+)]
+fn image(keys: DictKeys) -> ImageBackend {
+    ImageBackend::new(inventory(keys).expect("disjoint"), TargetProcess::default())
 }
 
 fn request(id: u64, scope: Scope) -> Kind {
@@ -120,7 +128,7 @@ impl Daemon {
     }
 }
 
-fn start(backend: impl Backend) -> (Daemon, std::thread::JoinHandle<u8>) {
+fn start(backend: impl Backend) -> (Daemon, std::thread::JoinHandle<Exit>) {
     let (reader_in, to_reader) = std::io::pipe().expect("pipe");
     let (from_reader, reader_out) = std::io::pipe().expect("pipe");
     let out: Outgoing = Arc::new(Mutex::new(Box::new(reader_out)));
@@ -136,17 +144,23 @@ fn start(backend: impl Backend) -> (Daemon, std::thread::JoinHandle<u8>) {
     )
 }
 
-fn failure(kind: Option<Kind>) -> (u64, ProbeError) {
+/// A failure's request id, `None` for a session-level one, and its error.
+fn failure(kind: Option<Kind>) -> (Option<u64>, ProbeError) {
     match kind {
-        Some(Kind::Failed(f)) => (f.request_id, f.error.expect("an error")),
+        Some(Kind::Failed(f)) => {
+            let id = match f.subject.expect("a subject") {
+                Subject::RequestId(id) => Some(id),
+                Subject::Session(_) => None,
+            };
+            (id, f.error.expect("an error"))
+        }
         other => panic!("expected Failed, got {other:?}"),
     }
 }
 
 #[test]
 fn a_session_reads_the_souls_and_shuts_down_cleanly() {
-    let backend = ImageBackend::new(inventory(DictKeys::Logged), TargetProcess::default());
-    let (mut d, reader) = start(backend);
+    let (mut d, reader) = start(image(DictKeys::Logged));
     d.send(handshake(1));
     let Some(Kind::HandshakeAck(ack)) = d.receive() else {
         panic!("ack")
@@ -167,27 +181,85 @@ fn a_session_reads_the_souls_and_shuts_down_cleanly() {
     };
     assert!(progress > 0);
     assert_eq!(result.request_id, 1);
-    let Some(Records::Souls(s)) = result.records else {
+    let Some(Records::Souls(s)) = result.reading.expect("a reading").records else {
         panic!("souls")
     };
     assert_eq!(s.souls.len(), 4);
     d.send(Kind::Shutdown(Shutdown {}));
-    assert_eq!(reader.join().expect("reader"), exit::CLEAN);
+    assert_eq!(reader.join().expect("reader"), Exit::Clean);
 }
 
 #[test]
 fn an_attach_failure_is_reported_with_its_exit_code() {
-    let (backend, _, _) = stub(Err(Failure::new(
-        code::ELEVATION_REQUIRED,
+    let (backend, _, _) = stub(Err(SessionFailure::new(
+        SessionReason::ElevationRequired,
         "elevated game",
-        exit::ELEVATION_REQUIRED,
     )));
     let (mut d, reader) = start(backend);
     d.send(handshake(1));
     let (id, e) = failure(d.receive());
-    assert_eq!(id, 0);
-    assert_eq!(e.code, code::ELEVATION_REQUIRED);
-    assert_eq!(reader.join().expect("reader"), exit::ELEVATION_REQUIRED);
+    assert_eq!(id, None);
+    assert_eq!(e.code(), ProbeErrorCode::ElevationRequired);
+    assert_eq!(reader.join().expect("reader"), Exit::ElevationRequired);
+}
+
+#[test]
+fn an_ambiguous_target_lists_its_candidates() {
+    let candidates = vec![
+        TargetProcess {
+            pid: 20,
+            ..TargetProcess::default()
+        },
+        TargetProcess {
+            pid: 30,
+            ..TargetProcess::default()
+        },
+    ];
+    let (backend, _, _) = stub(Err(SessionFailure::new(
+        SessionReason::Ambiguous {
+            candidates: candidates.clone(),
+        },
+        "two games",
+    )));
+    let (mut d, reader) = start(backend);
+    d.send(handshake(1));
+    let (_, e) = failure(d.receive());
+    assert_eq!(e.code(), ProbeErrorCode::AmbiguousTarget);
+    assert_eq!(
+        e.detail,
+        Some(probe::probe_error::Detail::Discovery(Discovery {
+            candidates
+        }))
+    );
+    assert_eq!(reader.join().expect("reader"), Exit::NotAttached);
+}
+
+#[test]
+fn a_handshake_without_a_version_or_a_target_is_a_protocol_error() {
+    for bad in [
+        Handshake {
+            version: None,
+            expected_engine: None,
+            target: Some(handshake::Target::Discover(Discover {})),
+        },
+        Handshake {
+            version: Some(probe::VERSION),
+            expected_engine: None,
+            target: None,
+        },
+        Handshake {
+            version: Some(probe::VERSION),
+            expected_engine: None,
+            target: Some(handshake::Target::Pid(0)),
+        },
+    ] {
+        let (backend, _, _) = stub(Ok(()));
+        let (mut d, reader) = start(backend);
+        d.send(Kind::Handshake(bad));
+        let (id, e) = failure(d.receive());
+        assert_eq!((id, e.code()), (None, ProbeErrorCode::ProtocolError));
+        assert_eq!(reader.join().expect("reader"), Exit::Protocol);
+    }
 }
 
 #[test]
@@ -196,8 +268,8 @@ fn another_major_version_is_refused() {
     let (mut d, reader) = start(backend);
     d.send(handshake(2));
     let (_, e) = failure(d.receive());
-    assert_eq!(e.code, code::PROTOCOL_UNSUPPORTED);
-    assert_eq!(reader.join().expect("reader"), exit::PROTOCOL);
+    assert_eq!(e.code(), ProbeErrorCode::ProtocolUnsupported);
+    assert_eq!(reader.join().expect("reader"), Exit::Protocol);
 }
 
 #[test]
@@ -206,8 +278,8 @@ fn a_malformed_frame_is_a_protocol_error() {
     let (mut d, reader) = start(backend);
     d.raw(&[0xff, 0xff, 0xff, 0xff]);
     let (id, e) = failure(d.receive());
-    assert_eq!((id, e.code.as_str()), (0, code::PROTOCOL_ERROR));
-    assert_eq!(reader.join().expect("reader"), exit::PROTOCOL);
+    assert_eq!((id, e.code()), (None, ProbeErrorCode::ProtocolError));
+    assert_eq!(reader.join().expect("reader"), Exit::Protocol);
 }
 
 #[test]
@@ -216,8 +288,8 @@ fn a_request_before_the_handshake_is_a_protocol_error() {
     let (mut d, reader) = start(backend);
     d.send(request(1, Scope::Souls));
     let (_, e) = failure(d.receive());
-    assert_eq!(e.code, code::PROTOCOL_ERROR);
-    assert_eq!(reader.join().expect("reader"), exit::PROTOCOL);
+    assert_eq!(e.code(), ProbeErrorCode::ProtocolError);
+    assert_eq!(reader.join().expect("reader"), Exit::Protocol);
 }
 
 #[test]
@@ -230,11 +302,11 @@ fn a_cancel_stops_a_running_read_with_one_answer() {
     assert!(matches!(d.receive(), Some(Kind::Progress(_))));
     d.send(Kind::Cancel(Cancel { request_id: 1 }));
     let (id, e) = failure(d.answer());
-    assert_eq!((id, e.code.as_str()), (1, code::CANCELLED));
+    assert_eq!((id, e.code()), (Some(1), ProbeErrorCode::Cancelled));
     // A cancel for an answered request is ignored.
     d.send(Kind::Cancel(Cancel { request_id: 1 }));
     d.send(Kind::Shutdown(Shutdown {}));
-    assert_eq!(reader.join().expect("reader"), exit::CLEAN);
+    assert_eq!(reader.join().expect("reader"), Exit::Clean);
     assert_eq!(*reads.lock().expect("count"), 1);
 }
 
@@ -252,11 +324,11 @@ fn a_request_cancelled_before_it_starts_is_never_read() {
     d.send(Kind::Cancel(Cancel { request_id: 2 }));
     d.send(Kind::Cancel(Cancel { request_id: 1 }));
     let answers = [failure(d.answer()), failure(d.answer())];
-    assert_eq!(answers[0].0, 1);
-    assert_eq!(answers[1].0, 2);
+    assert_eq!(answers[0].0, Some(1));
+    assert_eq!(answers[1].0, Some(2));
     assert_eq!(answers[1].1.message, "cancelled before it started");
     d.send(Kind::Shutdown(Shutdown {}));
-    assert_eq!(reader.join().expect("reader"), exit::CLEAN);
+    assert_eq!(reader.join().expect("reader"), Exit::Clean);
     assert_eq!(*reads.lock().expect("count"), 1);
 }
 
@@ -268,35 +340,36 @@ fn a_cancel_for_an_unknown_request_is_a_protocol_error() {
     assert!(matches!(d.receive(), Some(Kind::HandshakeAck(_))));
     d.send(Kind::Cancel(Cancel { request_id: 9 }));
     let (_, e) = failure(d.receive());
-    assert_eq!(e.code, code::PROTOCOL_ERROR);
-    assert_eq!(reader.join().expect("reader"), exit::PROTOCOL);
+    assert_eq!(e.code(), ProbeErrorCode::ProtocolError);
+    assert_eq!(reader.join().expect("reader"), Exit::Protocol);
 }
 
 #[test]
 fn a_reused_request_id_is_a_protocol_error() {
-    let backend = ImageBackend::new(inventory(DictKeys::Sized), TargetProcess::default());
-    let (mut d, reader) = start(backend);
+    let (mut d, reader) = start(image(DictKeys::Sized));
     d.send(handshake(1));
     assert!(matches!(d.receive(), Some(Kind::HandshakeAck(_))));
     d.send(request(1, Scope::Souls));
     assert!(matches!(d.answer(), Some(Kind::ReadResult(_))));
     d.send(request(1, Scope::Souls));
     let (_, e) = failure(d.receive());
-    assert_eq!(e.code, code::PROTOCOL_ERROR);
-    assert_eq!(reader.join().expect("reader"), exit::PROTOCOL);
+    assert_eq!(e.code(), ProbeErrorCode::ProtocolError);
+    assert_eq!(reader.join().expect("reader"), Exit::Protocol);
 }
 
 #[test]
 fn an_unknown_scope_is_answered_unsupported() {
-    let backend = ImageBackend::new(inventory(DictKeys::Logged), TargetProcess::default());
-    let (mut d, reader) = start(backend);
+    let (mut d, reader) = start(image(DictKeys::Logged));
     d.send(handshake(1));
     assert!(matches!(d.receive(), Some(Kind::HandshakeAck(_))));
     d.send(request(1, Scope::Unspecified));
     let (id, e) = failure(d.answer());
-    assert_eq!((id, e.code.as_str()), (1, code::SCOPE_UNSUPPORTED));
+    assert_eq!((id, e.code()), (Some(1), ProbeErrorCode::ScopeUnsupported));
+    // A request's failure leaves the session serving.
+    d.send(request(2, Scope::Souls));
+    assert!(matches!(d.answer(), Some(Kind::ReadResult(_))));
     drop(d);
-    assert_eq!(reader.join().expect("reader"), exit::CLEAN);
+    assert_eq!(reader.join().expect("reader"), Exit::Clean);
 }
 
 #[test]
@@ -304,5 +377,5 @@ fn a_closed_pipe_ends_the_session_cleanly() {
     let (backend, _, _) = stub(Ok(()));
     let (d, reader) = start(backend);
     drop(d);
-    assert_eq!(reader.join().expect("reader"), exit::CLEAN);
+    assert_eq!(reader.join().expect("reader"), Exit::Clean);
 }

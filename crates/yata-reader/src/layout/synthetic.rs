@@ -5,8 +5,8 @@
 //! The builder writes only what the reader reads. The index table of a dict is left zeroed,
 //! because the reader walks entries in insertion order and never looks a key up.
 
-use super::cpython::DictKeys;
-use super::memory::{Image, RegionKind};
+use super::cpython::{Builtin, DictKeys};
+use super::memory::{Image, Overlap, RegionKind};
 
 /// Where the synthetic image and heap start: ordinary 64-bit user-space addresses.
 pub const IMAGE_BASE: u64 = 0x1_4000_0000;
@@ -15,24 +15,31 @@ pub const HEAP_BASE: u64 = 0x2_0000_0000;
 /// Bytes reserved for each type object: past `tp_dict`, the last field the reader reads.
 const TYPE_OBJECT: usize = 400;
 
-/// The builtin types, their instance sizes, and their order in the image.
-const TYPES: [(&str, u64, u64); 9] = [
-    ("type", 880, 40),
-    ("dict", 48, 0),
-    ("list", 40, 0),
-    ("tuple", 24, 8),
-    ("str", 80, 0),
-    ("int", 24, 4),
-    ("float", 24, 0),
-    ("bool", 32, 4),
-    ("NoneType", 16, 0),
-];
+/// The instance size of `type` itself.
+const TYPE_SIZE: (u64, u64) = (880, 40);
+
+/// The instance size of each builtin type; the image holds them in [`Builtin::ALL`]'s order,
+/// after `type`.
+fn size(b: Builtin) -> (u64, u64) {
+    match b {
+        Builtin::Dict => (48, 0),
+        Builtin::List => (40, 0),
+        Builtin::Tuple => (24, 8),
+        Builtin::Str => (80, 0),
+        Builtin::Int => (24, 4),
+        Builtin::Float => (24, 0),
+        Builtin::Bool => (32, 4),
+        Builtin::NoneType => (16, 0),
+    }
+}
 
 pub struct Builder {
     keys: DictKeys,
     image: Vec<u8>,
     heap: Vec<u8>,
-    types: Vec<u64>,
+    type_type: u64,
+    /// The builtin types' addresses, by `Builtin as usize`.
+    types: [u64; 8],
     none: u64,
     heap_types: Vec<(String, u64)>,
 }
@@ -45,37 +52,47 @@ impl Builder {
             keys,
             image: vec![0; 4096],
             heap: vec![0; 64],
-            types: Vec::new(),
+            type_type: 0,
+            types: [0; 8],
             none: 0,
             heap_types: Vec::new(),
         };
-        for (name, basic, item) in TYPES {
-            let at = b.alloc_image(TYPE_OBJECT);
-            b.types.push(at);
-            let name_at = b.alloc_image(name.len() + 1);
-            b.put_image(name_at, name.as_bytes());
-            b.put_u64(at, 1_000);
-            b.put_u64(at + 24, name_at);
-            b.put_u64(at + 32, basic);
-            b.put_u64(at + 40, item);
+        let type_type = b.type_object("type", TYPE_SIZE);
+        b.type_type = type_type;
+        for builtin in Builtin::ALL {
+            b.types[builtin as usize] = b.type_object(builtin.name(), size(builtin));
         }
-        let type_type = b.types[0];
-        for &t in &b.types.clone() {
+        for t in std::iter::once(type_type).chain(b.types) {
             b.put_u64(t + 8, type_type);
         }
         let none = b.alloc_image(16);
         b.put_u64(none, 5_000);
-        b.put_u64(none + 8, b.ty("NoneType"));
+        b.put_u64(none + 8, b.ty(Builtin::NoneType));
         b.none = none;
         let doc = b.str("__doc__");
         let attrs = b.dict(&[(doc, none)]);
-        b.put_u64(b.ty("dict") + 264, attrs);
+        b.put_u64(b.ty(Builtin::Dict) + 264, attrs);
         b
     }
 
-    pub fn ty(&self, name: &str) -> u64 {
-        let i = TYPES.iter().position(|t| t.0 == name).unwrap_or(0);
-        self.types[i]
+    /// A type object in the image; its type is written once `type` exists.
+    fn type_object(&mut self, name: &str, (basic, item): (u64, u64)) -> u64 {
+        let at = self.alloc_image(TYPE_OBJECT);
+        let name_at = self.alloc_image(name.len() + 1);
+        self.put_image(name_at, name.as_bytes());
+        self.put_u64(at, 1_000);
+        self.put_u64(at + 24, name_at);
+        self.put_u64(at + 32, basic);
+        self.put_u64(at + 40, item);
+        at
+    }
+
+    pub fn type_type(&self) -> u64 {
+        self.type_type
+    }
+
+    pub fn ty(&self, b: Builtin) -> u64 {
+        self.types[b as usize]
     }
 
     pub fn none(&self) -> u64 {
@@ -136,7 +153,7 @@ impl Builder {
         let data = if ascii { 48 } else { 72 };
         let at = self.object(
             data + chars.len() * kind as usize + kind as usize,
-            self.ty("str"),
+            self.ty(Builtin::Str),
         );
         self.put_u64(at + 16, chars.len() as u64);
         let state = (kind << 2) | (1 << 5) | (u32::from(ascii) << 6) | (1 << 7);
@@ -150,14 +167,14 @@ impl Builder {
     }
 
     pub fn int(&mut self, n: i64) -> u64 {
-        self.long(n, "int")
+        self.long(n, Builtin::Int)
     }
 
     pub fn boolean(&mut self, b: bool) -> u64 {
-        self.long(i64::from(b), "bool")
+        self.long(i64::from(b), Builtin::Bool)
     }
 
-    fn long(&mut self, n: i64, ty: &str) -> u64 {
+    fn long(&mut self, n: i64, ty: Builtin) -> u64 {
         let mut magnitude = n.unsigned_abs();
         let mut digits = Vec::new();
         while magnitude > 0 {
@@ -175,7 +192,7 @@ impl Builder {
 
     /// An int with these raw 30-bit digits and sign, for values beyond 64 bits.
     pub fn int_digits(&mut self, digits: &[u32], negative: bool) -> u64 {
-        let at = self.object(24 + 4 * digits.len(), self.ty("int"));
+        let at = self.object(24 + 4 * digits.len(), self.ty(Builtin::Int));
         let size = digits.len() as i64 * if negative { -1 } else { 1 };
         self.put(at + 16, &size.to_le_bytes());
         for (i, d) in digits.iter().enumerate() {
@@ -185,13 +202,13 @@ impl Builder {
     }
 
     pub fn float(&mut self, x: f64) -> u64 {
-        let at = self.object(24, self.ty("float"));
+        let at = self.object(24, self.ty(Builtin::Float));
         self.put(at + 16, &x.to_le_bytes());
         at
     }
 
     pub fn list(&mut self, items: &[u64]) -> u64 {
-        let at = self.object(40, self.ty("list"));
+        let at = self.object(40, self.ty(Builtin::List));
         let array = self.alloc(8 * items.len().max(1));
         for (i, &p) in items.iter().enumerate() {
             self.put_u64(array + 8 * i as u64, p);
@@ -203,7 +220,7 @@ impl Builder {
     }
 
     pub fn tuple(&mut self, items: &[u64]) -> u64 {
-        let at = self.object(24 + 8 * items.len(), self.ty("tuple"));
+        let at = self.object(24 + 8 * items.len(), self.ty(Builtin::Tuple));
         self.put(at + 16, &(items.len() as i64).to_le_bytes());
         for (i, &p) in items.iter().enumerate() {
             self.put_u64(at + 24 + 8 * i as u64, p);
@@ -250,7 +267,7 @@ impl Builder {
                 at
             }
         };
-        let at = self.object(48, self.ty("dict"));
+        let at = self.object(48, self.ty(Builtin::Dict));
         self.put(at + 16, &(live as i64).to_le_bytes());
         self.put_u64(at + 32, keys);
         at
@@ -265,7 +282,7 @@ impl Builder {
                 let n = self.alloc(name.len() + 1);
                 self.put(n, name.as_bytes());
                 self.put_u64(t, 3);
-                self.put_u64(t + 8, self.ty("type"));
+                self.put_u64(t + 8, self.type_type);
                 self.put_u64(t + 24, n);
                 self.heap_types.push((name.to_owned(), t));
                 t
@@ -274,10 +291,11 @@ impl Builder {
         self.object(16, ty)
     }
 
-    pub fn finish(self) -> Image {
+    /// The image: the type objects' region and the heap, unless the image grew into the heap.
+    pub fn finish(self) -> Result<Image, Overlap> {
         let mut m = Image::new();
-        m.add(IMAGE_BASE, RegionKind::Image, true, self.image);
-        m.add(HEAP_BASE, RegionKind::Private, true, self.heap);
-        m
+        m.add(IMAGE_BASE, RegionKind::Image, true, self.image)?;
+        m.add(HEAP_BASE, RegionKind::Private, true, self.heap)?;
+        Ok(m)
     }
 }

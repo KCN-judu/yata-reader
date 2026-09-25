@@ -1,4 +1,6 @@
-use yata_protocol::probe::{Evidence, RawValue, raw_value::Kind, read_result::Records};
+use yata_protocol::probe::{
+    Coverage, RawValue, SoulMappings, mapping, raw_value::Kind, reading::Records,
+};
 
 use super::*;
 use crate::layout::cpython::{DictKeys, discover};
@@ -8,9 +10,9 @@ fn never() -> bool {
     false
 }
 
-fn read(keys: DictKeys) -> (ReadResult, Vec<(u64, u64)>) {
-    let image = inventory(keys);
-    let rt = discover(&image, &never).expect("discovered");
+fn read(keys: DictKeys) -> (Reading, Vec<(u64, u64)>) {
+    let image = inventory(keys).expect("disjoint");
+    let rt = discover(&image).expect("discovered");
     let mut seen = Vec::new();
     let result = read_souls(&image, &rt, &mut |d, t| seen.push((d, t)), &never).expect("read");
     (result, seen)
@@ -51,7 +53,8 @@ fn every_entry_is_kept_and_no_typed_field_is_filled() {
     assert_eq!(first.suit_code, None);
     assert_eq!(first.star, None);
     assert_eq!(first.main, None);
-    assert!(first.subs.is_empty());
+    assert_eq!(first.subs, None);
+    assert_eq!(first.innate, None);
     let observed = first.observed.as_ref().expect("observed");
     assert_eq!(observed.type_name, "dict");
     let names: Vec<&str> = observed
@@ -89,13 +92,18 @@ fn every_entry_is_kept_and_no_typed_field_is_filled() {
 }
 
 #[test]
-fn the_result_states_the_recognition_rule_as_inherited() {
+fn the_reading_states_the_recognition_rule_as_inherited_and_maps_no_field() {
     let (result, _) = read(DictKeys::Logged);
-    assert_eq!(result.field_evidence.len(), 1);
-    let e = &result.field_evidence[0];
-    assert_eq!(e.field, RECOGNITION_FIELD);
-    assert_eq!(e.evidence(), Evidence::Inherited);
+    let Some(Records::Souls(s)) = &result.records else {
+        panic!("souls")
+    };
+    assert!(matches!(
+        s.recognition.as_ref().and_then(|m| m.evidence.as_ref()),
+        Some(mapping::Evidence::Inherited(_))
+    ));
+    assert_eq!(s.mappings, Some(SoulMappings::default()));
     assert_eq!(result.coverage(), Coverage::Partial);
+    assert_eq!(result.observed_account_id, None);
     let stats = result.stats.expect("stats");
     assert_eq!(stats.regions_scanned, 1);
     assert_eq!(stats.regions_unreadable, 0);
@@ -114,8 +122,8 @@ fn progress_only_grows_and_ends_at_the_total() {
 
 #[test]
 fn a_cancelled_read_stops_at_a_checkpoint() {
-    let image = inventory(DictKeys::Logged);
-    let rt = discover(&image, &never).expect("discovered");
+    let image = inventory(DictKeys::Logged).expect("disjoint");
+    let rt = discover(&image).expect("discovered");
     assert_eq!(
         read_souls(&image, &rt, &mut |_, _| (), &|| true),
         Err(Cancelled)

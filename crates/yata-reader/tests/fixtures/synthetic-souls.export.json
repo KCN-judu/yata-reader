@@ -5,17 +5,9 @@
   "probeBuildId": "yata-reader synthetic-fixture",
   "engine": "cpython-3.11",
   "channel": "CHANNEL_DESKTOP_MEMORY",
-  "results": [
+  "readings": [
     {
-      "scope": "SCOPE_SOULS",
       "coverage": "COVERAGE_PARTIAL",
-      "fieldEvidence": [
-        {
-          "field": "SoulRecord",
-          "evidence": "EVIDENCE_INHERITED",
-          "basis": "prior tool: a dict holding at least two of base_rindex, rattr, single_attr, others, sattr, where base_rindex and others are ints, rattr is a list, single_attr is an int or None, sattr is a str, and base_r is a number"
-        }
-      ],
       "stats": {
         "regionsScanned": "1",
         "bytesScanned": "4688",
@@ -56,12 +48,10 @@
                               {
                                 "float": 0.0
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         }
-                      ],
-                      "length": "1"
+                      ]
                     }
                   }
                 },
@@ -133,8 +123,7 @@
                               {
                                 "float": 0.0
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         },
                         {
@@ -147,12 +136,10 @@
                               {
                                 "float": 0.5
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         }
-                      ],
-                      "length": "2"
+                      ]
                     }
                   }
                 },
@@ -224,8 +211,7 @@
                               {
                                 "float": 0.0
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         },
                         {
@@ -238,8 +224,7 @@
                               {
                                 "float": 0.5
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         },
                         {
@@ -252,12 +237,10 @@
                               {
                                 "float": 1.0
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         }
-                      ],
-                      "length": "3"
+                      ]
                     }
                   }
                 },
@@ -326,8 +309,7 @@
                               {
                                 "float": 0.0
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         },
                         {
@@ -340,8 +322,7 @@
                               {
                                 "float": 0.5
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         },
                         {
@@ -354,8 +335,7 @@
                               {
                                 "float": 1.0
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         },
                         {
@@ -368,12 +348,10 @@
                               {
                                 "float": 1.5
                               }
-                            ],
-                            "length": "2"
+                            ]
                           }
                         }
-                      ],
-                      "length": "4"
+                      ]
                     }
                   }
                 },
@@ -412,7 +390,11 @@
               ]
             }
           }
-        ]
+        ],
+        "recognition": {
+          "inherited": {}
+        },
+        "mappings": {}
       }
     }
   ],
@@ -420,6 +402,6 @@
   "target": {
     "pid": 4242,
     "imageName": "synthetic.exe",
-    "pointerBits": 64
+    "pointerWidth": "POINTER_WIDTH_64"
   }
 }

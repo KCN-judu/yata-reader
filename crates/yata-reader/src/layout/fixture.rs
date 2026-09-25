@@ -3,7 +3,7 @@
 //! stores; it exercises every path the reader has.
 
 use super::cpython::DictKeys;
-use super::memory::Image;
+use super::memory::{Image, Overlap};
 use super::synthetic::Builder;
 
 /// Container keys of the three souls the inventory holds, in its order.
@@ -17,7 +17,7 @@ pub const IDS: [&str; 3] = [
 /// of the three, a dict with only one marker key, which is not a soul, and a dict with two
 /// marker keys whose values are texts, as in the runtime's table of interned names, which the
 /// rule rejects.
-pub fn inventory(keys: DictKeys) -> Image {
+pub fn inventory(keys: DictKeys) -> Result<Image, Overlap> {
     let mut b = Builder::new(keys);
     let k = |b: &mut Builder, s: &str| b.str(s);
     let (base_rindex, rattr, single_attr, others, sattr, base_r, note) = (

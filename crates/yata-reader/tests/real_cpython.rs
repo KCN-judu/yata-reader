@@ -10,12 +10,13 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use yata_protocol::probe::read_result::Records;
+use yata_protocol::probe::reading::Records;
 use yata_protocol::probe::{RawValue, raw_value::Kind};
 use yata_reader::desktop;
 use yata_reader::layout::cpython::discover;
 use yata_reader::layout::memory::Cached;
 use yata_reader::layout::souls::read_souls;
+use yata_reader::session::Target;
 
 const SCRIPT: &str = r#"
 import sys, time
@@ -83,10 +84,11 @@ fn a_real_cpython_inventory_is_read_from_outside() {
     }
     let pid = s.child.as_ref().map(Child::id).expect("started");
 
-    let (chosen, memory) = desktop::attach(pid).expect("our own child opens with read rights");
+    let target = Target::Pid(std::num::NonZeroU32::new(pid).expect("a live pid"));
+    let (chosen, memory) = desktop::attach(target).expect("our own child opens with read rights");
     assert_eq!(chosen.pid, pid);
     let memory = Cached::new(memory);
-    let runtime = discover(&memory, &|| false).expect("a CPython 3.6-3.11 runtime");
+    let runtime = discover(&memory).expect("a CPython 3.6-3.11 runtime");
     let result = read_souls(&memory, &runtime, &mut |_, _| (), &|| false).expect("read");
 
     let Some(Records::Souls(souls)) = &result.records else {

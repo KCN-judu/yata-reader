@@ -225,10 +225,17 @@ pub fn processes() -> io::Result<Vec<ProcessEntry>> {
     Ok(out)
 }
 
+/// The pointer width a process runs with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bitness {
+    Bits32,
+    Bits64,
+}
+
 /// What can be learnt about a process with limited query rights alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ProcessFacts {
-    pub pointer_bits: Option<u32>,
+    pub bitness: Option<Bitness>,
     pub created_unix_ms: Option<u64>,
     pub session_id: Option<u32>,
 }
@@ -249,10 +256,10 @@ pub fn facts(pid: u32) -> ProcessFacts {
     // outputs are writable u16s.
     if unsafe { IsWow64Process2(h.get(), &raw mut process_machine, &raw mut native_machine) } != 0 {
         // A process not under WOW64 has the host's width; this reader is built for 64-bit hosts.
-        f.pointer_bits = Some(if process_machine == IMAGE_FILE_MACHINE_UNKNOWN {
-            64
+        f.bitness = Some(if process_machine == IMAGE_FILE_MACHINE_UNKNOWN {
+            Bitness::Bits64
         } else {
-            32
+            Bitness::Bits32
         });
     }
     let mut created = FileTime::default();
@@ -438,7 +445,7 @@ mod tests {
     #[test]
     fn this_process_is_64_bit_and_readable() {
         let f = facts(std::process::id());
-        assert_eq!(f.pointer_bits, Some(64));
+        assert_eq!(f.bitness, Some(Bitness::Bits64));
         assert!(f.created_unix_ms.is_some());
         let p = open(std::process::id()).expect("our own process");
         let regions = p.regions();

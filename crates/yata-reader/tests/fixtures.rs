@@ -14,14 +14,14 @@ use prost::Message;
 use yata_protocol::export;
 use yata_protocol::frame::{self, FrameDecoder};
 use yata_protocol::probe::{
-    Handshake, ProbeMessage, ReadRequest, Scope, Shutdown, TargetProcess, VERSION,
-    probe_message::Kind,
+    Exit, Handshake, PointerWidth, ProbeMessage, ReadRequest, Scope, Shutdown, TargetProcess,
+    VERSION, probe_message::Kind, reading::Records,
 };
 use yata_reader::backend::ImageBackend;
 use yata_reader::diagnostics::Diagnostics;
 use yata_reader::layout::cpython::DictKeys;
 use yata_reader::layout::fixture::inventory;
-use yata_reader::session::{self, Outgoing};
+use yata_reader::session::{self, Outgoing, Target};
 
 const RECORDING: &str = "synthetic-souls.frames";
 const EXPORT: &str = "synthetic-souls.export.json";
@@ -38,7 +38,7 @@ fn target() -> TargetProcess {
     TargetProcess {
         pid: 4242,
         image_name: "synthetic.exe".into(),
-        pointer_bits: 64,
+        pointer_width: Some(PointerWidth::PointerWidth64.into()),
         ..TargetProcess::default()
     }
 }
@@ -68,6 +68,14 @@ fn frame_of(kind: Kind) -> Vec<u8> {
     frame::encode(&ProbeMessage { kind: Some(kind) }.encode_to_vec()).expect("encodable")
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "test helper: a failure here is the test failing"
+)]
+fn backend() -> ImageBackend {
+    ImageBackend::new(inventory(DictKeys::Logged).expect("disjoint"), target())
+}
+
 /// The frames a reader sends in a whole session: handshake, one read of the souls, shutdown.
 #[allow(
     clippy::expect_used,
@@ -77,15 +85,14 @@ fn session_recording() -> Vec<u8> {
     let (reader_in, mut to_reader) = std::io::pipe().expect("pipe");
     let tape = Tape::default();
     let out: Outgoing = Arc::new(Mutex::new(Box::new(tape.clone())));
-    let backend = ImageBackend::new(inventory(DictKeys::Logged), target());
     let reader = std::thread::spawn(move || {
-        session::run(backend, reader_in, out, BUILD, &Diagnostics::none())
+        session::run(backend(), reader_in, out, BUILD, &Diagnostics::none())
     });
     to_reader
         .write_all(&frame_of(Kind::Handshake(Handshake {
             version: Some(VERSION),
-            expected_engine: String::new(),
-            target_pid: 0,
+            expected_engine: None,
+            target: Some(Target::Discover.wire()),
         })))
         .expect("written");
     to_reader
@@ -116,7 +123,7 @@ fn session_recording() -> Vec<u8> {
     to_reader
         .write_all(&frame_of(Kind::Shutdown(Shutdown {})))
         .expect("written");
-    assert_eq!(reader.join().expect("reader"), 0);
+    assert_eq!(reader.join().expect("reader"), Exit::Clean);
     tape.0.lock().expect("tape").clone()
 }
 
@@ -125,16 +132,15 @@ fn session_recording() -> Vec<u8> {
     reason = "test helper: a failure here is the test failing"
 )]
 fn export_text() -> String {
-    let mut backend = ImageBackend::new(inventory(DictKeys::Logged), target());
     let e = yata_reader::export::read(
-        &mut backend,
-        0,
+        &mut backend(),
+        Target::Discover,
         BUILD,
         "2026-09-25T00:00:00Z",
         &mut |_, _| (),
     )
     .expect("read");
-    export::to_json(&e)
+    export::to_json(&e).expect("json")
 }
 
 #[test]
@@ -153,7 +159,7 @@ fn the_export_is_reproduced_byte_for_byte() {
 #[test]
 fn the_export_is_a_valid_export_of_four_souls() {
     let e = export::from_json(export_text().as_bytes()).expect("valid");
-    let Some(yata_protocol::probe::read_result::Records::Souls(s)) = &e.results[0].records else {
+    let Some(Records::Souls(s)) = &e.readings[0].records else {
         panic!("souls")
     };
     assert_eq!(s.souls.len(), 4);

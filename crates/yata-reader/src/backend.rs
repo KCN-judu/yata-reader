@@ -2,12 +2,14 @@
 //! synthetic image for tests and fixtures. Both attach by discovering the runtime's layout and
 //! read through the same [`crate::layout`] code.
 
-use yata_protocol::probe::{Channel, ReadResult, Scope, TargetProcess, code, exit};
+use yata_protocol::probe::{Channel, Reading, Scope, TargetProcess};
 
-use crate::layout::cpython::{LayoutError, Runtime, discover};
+use crate::layout::cpython::{Cancelled, LayoutError, Runtime, discover};
 use crate::layout::memory::{Cached, Image, Memory};
-use crate::layout::souls::{Cancelled, read_souls};
-use crate::session::{Attached, Backend, Failure};
+use crate::layout::souls::read_souls;
+use crate::session::{
+    Attached, Backend, RequestFailure, RequestReason, SessionFailure, SessionReason, Target,
+};
 
 /// Memory with its runtime found.
 struct Attachment<M> {
@@ -15,71 +17,86 @@ struct Attachment<M> {
     runtime: Runtime,
 }
 
-fn layout_failure(e: &LayoutError) -> Failure {
-    Failure::new(
-        code::LAYOUT_MISMATCH,
+fn layout_failure(e: &LayoutError) -> SessionFailure {
+    SessionFailure::new(
+        SessionReason::LayoutMismatch,
         format!("the game's memory is not a known layout: {e:?}"),
-        exit::NO_STRATEGY,
     )
 }
 
-fn attach_to<M: Memory>(memory: M) -> Result<Attachment<M>, Failure> {
+fn attach_to<M: Memory>(memory: M) -> Result<Attachment<M>, SessionFailure> {
     let memory = Cached::new(memory);
-    let runtime = discover(&memory, &|| false).map_err(|e| layout_failure(&e))?;
+    let runtime = discover(&memory).map_err(|e| layout_failure(&e))?;
     Ok(Attachment { memory, runtime })
 }
 
+fn not_attached() -> RequestFailure {
+    RequestFailure::new(RequestReason::NotAttached, "no game is attached")
+}
+
 fn read_from<M: Memory>(
-    a: Option<&Attachment<M>>,
+    a: &Attachment<M>,
     scope: Scope,
     progress: &mut dyn FnMut(u64, u64),
     cancelled: &dyn Fn() -> bool,
-) -> Result<ReadResult, Failure> {
-    let a = a.ok_or_else(|| Failure::new(code::NOT_ATTACHED, "no game is attached", 0))?;
+) -> Result<Reading, RequestFailure> {
     match scope {
         Scope::Souls => read_souls(&a.memory, &a.runtime, progress, cancelled)
-            .map_err(|Cancelled| Failure::new(code::CANCELLED, "cancelled", 0)),
-        Scope::Unspecified => Err(Failure::new(
-            code::SCOPE_UNSUPPORTED,
+            .map_err(|Cancelled| RequestFailure::new(RequestReason::Cancelled, "cancelled")),
+        Scope::Unspecified => Err(RequestFailure::new(
+            RequestReason::ScopeUnsupported,
             "this reader does not read that scope",
-            0,
         )),
     }
 }
 
+/// Where a synthetic backend stands.
+enum ImageState {
+    /// Not attached yet: the memory waits.
+    Detached(Image),
+    Attached(Attachment<Image>),
+    /// An attach was tried and failed; the memory is gone with it.
+    Failed,
+}
+
 /// Synthetic memory standing in for a game process.
 pub struct ImageBackend {
-    image: Option<Image>,
     target: TargetProcess,
-    attached: Option<Attachment<Image>>,
+    state: ImageState,
 }
 
 impl ImageBackend {
     pub fn new(image: Image, target: TargetProcess) -> ImageBackend {
         ImageBackend {
-            image: Some(image),
             target,
-            attached: None,
+            state: ImageState::Detached(image),
         }
     }
 }
 
 impl Backend for ImageBackend {
-    fn attach(&mut self, target_pid: u32) -> Result<Attached, Failure> {
-        if target_pid != 0 && target_pid != self.target.pid {
-            return Err(Failure::new(
-                code::NOT_FOUND,
-                format!("no process has pid {target_pid}"),
-                exit::NOT_ATTACHED,
+    fn attach(&mut self, target: Target) -> Result<Attached, SessionFailure> {
+        if let Target::Pid(pid) = target
+            && pid.get() != self.target.pid
+        {
+            return Err(SessionFailure::new(
+                SessionReason::NotFound,
+                format!("no process has pid {pid}"),
             ));
         }
-        let image = self
-            .image
-            .take()
-            .ok_or_else(|| Failure::new(code::INTERNAL, "attached twice", exit::INTERNAL))?;
+        let image = match std::mem::replace(&mut self.state, ImageState::Failed) {
+            ImageState::Detached(image) => image,
+            other => {
+                self.state = other;
+                return Err(SessionFailure::new(
+                    SessionReason::Internal,
+                    "attached twice",
+                ));
+            }
+        };
         let a = attach_to(image)?;
         let engine = a.runtime.engine().to_owned();
-        self.attached = Some(a);
+        self.state = ImageState::Attached(a);
         Ok(Attached {
             engine,
             channel: Channel::DesktopMemory,
@@ -92,8 +109,11 @@ impl Backend for ImageBackend {
         scope: Scope,
         progress: &mut dyn FnMut(u64, u64),
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<ReadResult, Failure> {
-        read_from(self.attached.as_ref(), scope, progress, cancelled)
+    ) -> Result<Reading, RequestFailure> {
+        match &self.state {
+            ImageState::Attached(a) => read_from(a, scope, progress, cancelled),
+            ImageState::Detached(_) | ImageState::Failed => Err(not_attached()),
+        }
     }
 }
 
@@ -106,16 +126,9 @@ pub struct DesktopBackend {
 
 impl Backend for DesktopBackend {
     #[cfg(windows)]
-    fn attach(&mut self, target_pid: u32) -> Result<Attached, Failure> {
-        use crate::desktop::{self, AttachError};
-        let (chosen, memory) = desktop::attach(target_pid).map_err(|e| {
-            let mut f = Failure::new(e.code(), e.message(), e.exit());
-            f.os_error = e.os_error();
-            if let AttachError::Ambiguous { candidates } = &e {
-                f.candidates = candidates.iter().map(desktop::target_of).collect();
-            }
-            f
-        })?;
+    fn attach(&mut self, target: Target) -> Result<Attached, SessionFailure> {
+        use crate::desktop;
+        let (chosen, memory) = desktop::attach(target).map_err(|e| e.failure())?;
         let a = attach_to(memory)?;
         let engine = a.runtime.engine().to_owned();
         self.attached = Some(a);
@@ -127,11 +140,10 @@ impl Backend for DesktopBackend {
     }
 
     #[cfg(not(windows))]
-    fn attach(&mut self, _target_pid: u32) -> Result<Attached, Failure> {
-        Err(Failure::new(
-            code::UNSUPPORTED_ENVIRONMENT,
+    fn attach(&mut self, _target: Target) -> Result<Attached, SessionFailure> {
+        Err(SessionFailure::new(
+            SessionReason::UnsupportedEnvironment,
             "the desktop channel reads the Windows game, and this is not Windows",
-            exit::NO_STRATEGY,
         ))
     }
 
@@ -141,8 +153,9 @@ impl Backend for DesktopBackend {
         scope: Scope,
         progress: &mut dyn FnMut(u64, u64),
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<ReadResult, Failure> {
-        read_from(self.attached.as_ref(), scope, progress, cancelled)
+    ) -> Result<Reading, RequestFailure> {
+        let a = self.attached.as_ref().ok_or_else(not_attached)?;
+        read_from(a, scope, progress, cancelled)
     }
 
     #[cfg(not(windows))]
@@ -151,7 +164,7 @@ impl Backend for DesktopBackend {
         _scope: Scope,
         _progress: &mut dyn FnMut(u64, u64),
         _cancelled: &dyn Fn() -> bool,
-    ) -> Result<ReadResult, Failure> {
-        Err(Failure::new(code::NOT_ATTACHED, "no game is attached", 0))
+    ) -> Result<Reading, RequestFailure> {
+        Err(not_attached())
     }
 }

@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::convert::Infallible;
 
 use yata_protocol::probe::{
     RawEntry, RawMapping, RawNull, RawSequence, RawUnread, RawValue, SequenceKind, UnreadReason,
@@ -49,21 +50,60 @@ const STR_ASCII_DATA: u64 = 48;
 const STR_COMPACT_DATA: u64 = 72;
 const STR_DATA_POINTER: u64 = 72;
 
-/// Instance sizes (`tp_basicsize`, `tp_itemsize`) this layout gives the builtin types. A str of
-/// 80 bytes is the representation with a `wstr` field, which 3.12 removed.
-const SIZES: [(&str, u64, u64); 6] = [
-    ("str", 80, 0),
-    ("dict", 48, 0),
-    ("float", 24, 0),
-    ("list", 40, 0),
-    ("tuple", 24, 8),
-    ("int", 24, 4),
-];
-
 /// The builtin types the value decoder knows.
-const BUILTINS: [&str; 8] = [
-    "dict", "list", "tuple", "str", "int", "float", "bool", "NoneType",
-];
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Builtin {
+    Dict,
+    List,
+    Tuple,
+    Str,
+    Int,
+    Float,
+    Bool,
+    NoneType,
+}
+
+impl Builtin {
+    pub const ALL: [Builtin; 8] = [
+        Builtin::Dict,
+        Builtin::List,
+        Builtin::Tuple,
+        Builtin::Str,
+        Builtin::Int,
+        Builtin::Float,
+        Builtin::Bool,
+        Builtin::NoneType,
+    ];
+
+    /// The type's `tp_name`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Builtin::Dict => "dict",
+            Builtin::List => "list",
+            Builtin::Tuple => "tuple",
+            Builtin::Str => "str",
+            Builtin::Int => "int",
+            Builtin::Float => "float",
+            Builtin::Bool => "bool",
+            Builtin::NoneType => "NoneType",
+        }
+    }
+
+    /// The instance size (`tp_basicsize`, `tp_itemsize`) this layout gives the type, for the
+    /// types whose size the layout check reads. A str of 80 bytes is the representation with a
+    /// `wstr` field, which 3.12 removed.
+    fn size(self) -> Option<(u64, u64)> {
+        match self {
+            Builtin::Str => Some((80, 0)),
+            Builtin::Dict => Some((48, 0)),
+            Builtin::Float => Some((24, 0)),
+            Builtin::List => Some((40, 0)),
+            Builtin::Tuple => Some((24, 8)),
+            Builtin::Int => Some((24, 4)),
+            Builtin::Bool | Builtin::NoneType => None,
+        }
+    }
+}
 
 /// Why the target's memory is not a runtime this reader can read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,17 +111,30 @@ pub enum LayoutError {
     /// No object in a loaded image is its own type named `type`, or more than one is.
     TypeObject { found: usize },
     /// A builtin type is not found exactly once in loaded images.
-    Builtin { name: &'static str, found: usize },
+    Builtin { builtin: Builtin, found: usize },
     /// A builtin type's instance size is not this layout's.
     Size {
-        name: &'static str,
+        builtin: Builtin,
         basic: u64,
         item: u64,
     },
+    /// A builtin type's instance size could not be read.
+    SizeUnreadable { builtin: Builtin },
     /// The dict key table header matches neither known shape.
     DictKeys,
-    /// The scan was cancelled.
-    Cancelled,
+}
+
+/// A read stopped at the daemon's `Cancel`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled;
+
+/// One chunk a scan copied, or failed to copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chunk {
+    /// The index, in [`Memory::regions`], of the region the chunk is in.
+    pub region: usize,
+    pub bytes: u64,
+    pub readable: bool,
 }
 
 /// The two shapes of the dict key table in the versions this layout covers.
@@ -116,6 +169,25 @@ impl Runtime {
             DictKeys::Logged => "cpython-3.11",
         }
     }
+
+    /// The address of a builtin type.
+    pub fn address(&self, b: Builtin) -> u64 {
+        match b {
+            Builtin::Dict => self.dict,
+            Builtin::List => self.list,
+            Builtin::Tuple => self.tuple,
+            Builtin::Str => self.str_,
+            Builtin::Int => self.int,
+            Builtin::Float => self.float,
+            Builtin::Bool => self.bool_,
+            Builtin::NoneType => self.none_type,
+        }
+    }
+
+    /// Which builtin type a type address is, if any.
+    pub fn builtin(&self, t: u64) -> Option<Builtin> {
+        Builtin::ALL.into_iter().find(|&b| self.address(b) == t)
+    }
 }
 
 /// Whether a value looks like a user-space pointer.
@@ -124,26 +196,28 @@ pub fn plausible_pointer(p: u64) -> bool {
 }
 
 /// Every aligned address in the regions `pick` accepts whose 8 bytes satisfy `hit`, in address
-/// order. Returns the hits and the bytes scanned; stops early when `cancelled` says so.
-pub fn scan(
+/// order. `checkpoint` runs before each chunk, and its error stops the scan; `on_chunk` hears of
+/// each chunk copied or not.
+pub fn scan<E>(
     mem: &dyn Memory,
     pick: impl Fn(RegionKind, bool) -> bool,
     mut hit: impl FnMut(u64, u64) -> bool,
-    cancelled: &dyn Fn() -> bool,
-    mut on_chunk: impl FnMut(u64, bool),
-) -> Result<Vec<u64>, LayoutError> {
+    mut checkpoint: impl FnMut() -> Result<(), E>,
+    mut on_chunk: impl FnMut(Chunk),
+) -> Result<Vec<u64>, E> {
     let mut hits = Vec::new();
     let mut buf = vec![0u8; SCAN_CHUNK as usize];
-    for r in mem.regions().iter().filter(|r| pick(r.kind, r.writable)) {
+    for (region, r) in mem.regions().iter().enumerate() {
+        if !pick(r.kind, r.writable) {
+            continue;
+        }
         let mut at = r.base;
         while at < r.end() {
-            if cancelled() {
-                return Err(LayoutError::Cancelled);
-            }
+            checkpoint()?;
             let len = SCAN_CHUNK.min(r.end() - at) as usize;
             let chunk = &mut buf[..len];
-            let ok = mem.read_into(at, chunk).is_ok();
-            if ok {
+            let readable = mem.read_into(at, chunk).is_ok();
+            if readable {
                 for (i, q) in chunk.chunks_exact(8).enumerate() {
                     let address = at + 8 * i as u64;
                     let mut b = [0u8; 8];
@@ -153,11 +227,25 @@ pub fn scan(
                     }
                 }
             }
-            on_chunk(len as u64, ok);
+            on_chunk(Chunk {
+                region,
+                bytes: len as u64,
+                readable,
+            });
             at += len as u64;
         }
     }
     Ok(hits)
+}
+
+/// A scan that runs to its end.
+fn scan_whole(
+    mem: &dyn Memory,
+    pick: impl Fn(RegionKind, bool) -> bool,
+    hit: impl FnMut(u64, u64) -> bool,
+) -> Vec<u64> {
+    let Ok(hits) = scan(mem, pick, hit, || Ok::<(), Infallible>(()), |_| ());
+    hits
 }
 
 /// A NUL-terminated byte string of at most `max` bytes, read in small steps so a name near the
@@ -182,8 +270,8 @@ pub fn c_string(mem: &dyn Memory, p: u64, max: usize) -> Option<String> {
     None
 }
 
-/// Find the runtime's types in the target's loaded images. `cancelled` is checked between chunks.
-pub fn discover(mem: &dyn Memory, cancelled: &dyn Fn() -> bool) -> Result<Runtime, LayoutError> {
+/// Find the runtime's types in the target's loaded images.
+pub fn discover(mem: &dyn Memory) -> Result<Runtime, LayoutError> {
     let image = |kind: RegionKind, _writable: bool| kind == RegionKind::Image;
     let name_of = |object: u64| {
         mem.read_u64(object + TP_NAME)
@@ -192,13 +280,7 @@ pub fn discover(mem: &dyn Memory, cancelled: &dyn Fn() -> bool) -> Result<Runtim
             .and_then(|p| c_string(mem, p, MAX_TYPE_NAME))
     };
     // `type` is the one object whose type is itself: its ob_type field holds its own address.
-    let own_type = scan(
-        mem,
-        image,
-        |a, v| a >= OB_TYPE && v == a - OB_TYPE,
-        cancelled,
-        |_, _| (),
-    )?;
+    let own_type = scan_whole(mem, image, |a, v| a >= OB_TYPE && v == a - OB_TYPE);
     let type_type: Vec<u64> = own_type
         .into_iter()
         .map(|a| a - OB_TYPE)
@@ -211,55 +293,61 @@ pub fn discover(mem: &dyn Memory, cancelled: &dyn Fn() -> bool) -> Result<Runtim
     };
     let type_type = *type_type;
     // Every builtin type is an instance of `type` in a loaded image.
-    let instances = scan(mem, image, |_, v| v == type_type, cancelled, |_, _| ())?;
-    let mut by_name: HashMap<&'static str, Vec<u64>> = HashMap::new();
+    let instances = scan_whole(mem, image, |_, v| v == type_type);
+    let mut by_builtin: HashMap<Builtin, Vec<u64>> = HashMap::new();
     for a in instances {
         let object = a - OB_TYPE;
         if let Some(n) = name_of(object)
-            && let Some(known) = BUILTINS.iter().find(|b| **b == n)
+            && let Some(known) = Builtin::ALL.into_iter().find(|b| b.name() == n)
         {
-            by_name.entry(known).or_default().push(object);
+            by_builtin.entry(known).or_default().push(object);
         }
     }
-    let one = |name: &'static str| match by_name.get(name).map(Vec::as_slice) {
+    let one = |builtin: Builtin| match by_builtin.get(&builtin).map(Vec::as_slice) {
         Some([t]) => Ok(*t),
         other => Err(LayoutError::Builtin {
-            name,
+            builtin,
             found: other.map_or(0, <[u64]>::len),
         }),
     };
-    let rt = Runtime {
-        type_type,
-        dict: one("dict")?,
-        list: one("list")?,
-        tuple: one("tuple")?,
-        str_: one("str")?,
-        int: one("int")?,
-        float: one("float")?,
-        bool_: one("bool")?,
-        none_type: one("NoneType")?,
-        keys: DictKeys::Logged,
-    };
-    for (name, basic, item) in SIZES {
-        let t = one(name)?;
-        let b = mem.read_u64(t + TP_BASICSIZE).unwrap_or(u64::MAX);
-        let i = mem.read_u64(t + TP_ITEMSIZE).unwrap_or(u64::MAX);
+    for builtin in Builtin::ALL {
+        let t = one(builtin)?;
+        let Some((basic, item)) = builtin.size() else {
+            continue;
+        };
+        let (Ok(b), Ok(i)) = (
+            mem.read_u64(t + TP_BASICSIZE),
+            mem.read_u64(t + TP_ITEMSIZE),
+        ) else {
+            return Err(LayoutError::SizeUnreadable { builtin });
+        };
         if (b, i) != (basic, item) {
             return Err(LayoutError::Size {
-                name,
+                builtin,
                 basic: b,
                 item: i,
             });
         }
     }
-    let keys = key_shape(mem, &rt).ok_or(LayoutError::DictKeys)?;
-    Ok(Runtime { keys, ..rt })
+    let dict = one(Builtin::Dict)?;
+    Ok(Runtime {
+        type_type,
+        dict,
+        list: one(Builtin::List)?,
+        tuple: one(Builtin::Tuple)?,
+        str_: one(Builtin::Str)?,
+        int: one(Builtin::Int)?,
+        float: one(Builtin::Float)?,
+        bool_: one(Builtin::Bool)?,
+        none_type: one(Builtin::NoneType)?,
+        keys: key_shape(mem, dict).ok_or(LayoutError::DictKeys)?,
+    })
 }
 
 /// The key table shape, read from the attribute dict of the `dict` type itself.
-fn key_shape(mem: &dyn Memory, rt: &Runtime) -> Option<DictKeys> {
-    let d = mem.read_u64(rt.dict + TP_DICT).ok()?;
-    if mem.read_u64(d + OB_TYPE).ok()? != rt.dict {
+fn key_shape(mem: &dyn Memory, dict: u64) -> Option<DictKeys> {
+    let d = mem.read_u64(dict + TP_DICT).ok()?;
+    if mem.read_u64(d + OB_TYPE).ok()? != dict {
         return None;
     }
     let keys = mem.read_u64(d + DICT_KEYS).ok()?;
@@ -295,11 +383,19 @@ fn read<T>(r: Result<T, super::memory::Unreadable>) -> Result<T, Bad> {
     r.map_err(|_| Bad::Unreadable)
 }
 
-/// Decodes objects of one runtime. Type names are cached by type address.
+/// Decodes objects of one runtime. Type names are cached by type address, a name that could not
+/// be read as such.
 pub struct Decoder<'m> {
     pub mem: &'m dyn Memory,
     pub rt: &'m Runtime,
-    names: RefCell<HashMap<u64, String>>,
+    names: RefCell<HashMap<u64, Option<String>>>,
+}
+
+/// The two sequence types, whose items are found in different places.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sequence {
+    List,
+    Tuple,
 }
 
 impl<'m> Decoder<'m> {
@@ -328,7 +424,8 @@ impl<'m> Decoder<'m> {
         }
     }
 
-    pub fn type_name(&self, t: u64) -> String {
+    /// A type's name, or `None` if it cannot be read.
+    pub fn type_name(&self, t: u64) -> Option<String> {
         if let Some(n) = self.names.borrow().get(&t) {
             return n.clone();
         }
@@ -336,8 +433,7 @@ impl<'m> Decoder<'m> {
             .mem
             .read_u64(t + TP_NAME)
             .ok()
-            .and_then(|p| c_string(self.mem, p, MAX_TYPE_NAME))
-            .unwrap_or_default();
+            .and_then(|p| c_string(self.mem, p, MAX_TYPE_NAME));
         self.names.borrow_mut().insert(t, n.clone());
         n
     }
@@ -488,14 +584,13 @@ impl<'m> Decoder<'m> {
         Ok((items, used))
     }
 
-    fn sequence(&self, object: u64, tuple: bool) -> Result<(Vec<u64>, u64), Bad> {
+    fn sequence(&self, object: u64, kind: Sequence) -> Result<(Vec<u64>, u64), Bad> {
         let n = read(self.mem.read_i64(object + OB_SIZE))?;
         let n = u64::try_from(n).map_err(|_| Bad::Malformed)?;
         let shown = n.min(MAX_ITEMS as u64);
-        let items = if tuple {
-            object + TUPLE_ITEMS
-        } else {
-            read(self.mem.read_u64(object + LIST_ITEMS))?
+        let items = match kind {
+            Sequence::Tuple => object + TUPLE_ITEMS,
+            Sequence::List => read(self.mem.read_u64(object + LIST_ITEMS))?,
         };
         if shown > 0 && !plausible_pointer(items) {
             return Err(Bad::Malformed);
@@ -516,59 +611,63 @@ impl<'m> Decoder<'m> {
     pub fn value(&self, object: u64, depth: usize) -> RawValue {
         let t = match self.type_of(object) {
             Ok(t) => t,
-            Err(b) => return unread(String::new(), b),
+            Err(b) => return unread(None, b),
         };
-        let rt = self.rt;
-        let container = t == rt.dict || t == rt.list || t == rt.tuple;
-        if container && depth == 0 {
-            return unread_reason(self.type_name(t), UnreadReason::DepthLimit);
-        }
-        let kind = if t == rt.none_type {
-            Ok(Kind::Null(RawNull {}))
-        } else if t == rt.bool_ {
-            self.integer(object).map(|n| Kind::Boolean(n != 0))
-        } else if t == rt.int {
-            self.integer(object).map(Kind::Integer)
-        } else if t == rt.float {
-            read(self.mem.read_f64(object + FLOAT_VALUE)).map(Kind::Float)
-        } else if t == rt.str_ {
-            self.text(object).map(Kind::Text)
-        } else if t == rt.list || t == rt.tuple {
-            self.sequence(object, t == rt.tuple).map(|(items, length)| {
+        let Some(builtin) = self.rt.builtin(t) else {
+            return unread_reason(self.type_name(t), UnreadReason::UnknownKind);
+        };
+        // The depth left for a container's items; a scalar has none to pass on.
+        let inner = match builtin {
+            Builtin::Dict | Builtin::List | Builtin::Tuple => match depth.checked_sub(1) {
+                Some(inner) => inner,
+                None => {
+                    return unread_reason(
+                        Some(builtin.name().to_owned()),
+                        UnreadReason::DepthLimit,
+                    );
+                }
+            },
+            _ => 0,
+        };
+        let sequence = |kind: Sequence| {
+            self.sequence(object, kind).map(|(items, length)| {
                 Kind::Sequence(RawSequence {
-                    kind: if t == rt.tuple {
-                        SequenceKind::Tuple
-                    } else {
-                        SequenceKind::List
+                    kind: match kind {
+                        Sequence::List => SequenceKind::List,
+                        Sequence::Tuple => SequenceKind::Tuple,
                     }
                     .into(),
-                    items: items.iter().map(|&i| self.value(i, depth - 1)).collect(),
-                    truncated: (items.len() as u64) < length,
-                    length,
+                    full_length: ((items.len() as u64) < length).then_some(length),
+                    items: items.iter().map(|&i| self.value(i, inner)).collect(),
                 })
             })
-        } else if t == rt.dict {
-            self.dict_items(object).map(|(items, used)| {
+        };
+        let kind = match builtin {
+            Builtin::NoneType => Ok(Kind::Null(RawNull {})),
+            Builtin::Bool => self.integer(object).map(|n| Kind::Boolean(n != 0)),
+            Builtin::Int => self.integer(object).map(Kind::Integer),
+            Builtin::Float => read(self.mem.read_f64(object + FLOAT_VALUE)).map(Kind::Float),
+            Builtin::Str => self.text(object).map(Kind::Text),
+            Builtin::List => sequence(Sequence::List),
+            Builtin::Tuple => sequence(Sequence::Tuple),
+            Builtin::Dict => self.dict_items(object).map(|(items, used)| {
                 let shown: Vec<RawEntry> = items
                     .iter()
                     .take(MAX_ITEMS)
                     .map(|&(k, v)| RawEntry {
-                        key: Some(self.value(k, depth - 1)),
-                        value: Some(self.value(v, depth - 1)),
+                        key: Some(self.value(k, inner)),
+                        value: Some(self.value(v, inner)),
                     })
                     .collect();
                 Kind::Mapping(RawMapping {
-                    truncated: (shown.len() as u64) < used,
+                    full_length: ((shown.len() as u64) < used).then_some(used),
                     entries: shown,
-                    length: used,
                 })
-            })
-        } else {
-            return unread_reason(self.type_name(t), UnreadReason::UnknownKind);
+            }),
         };
         match kind {
             Ok(k) => RawValue { kind: Some(k) },
-            Err(b) => unread(self.type_name(t), b),
+            Err(b) => unread(Some(builtin.name().to_owned()), b),
         }
     }
 
@@ -578,7 +677,7 @@ impl<'m> Decoder<'m> {
     }
 }
 
-fn unread(type_name: String, bad: Bad) -> RawValue {
+fn unread(type_name: Option<String>, bad: Bad) -> RawValue {
     unread_reason(
         type_name,
         match bad {
@@ -589,7 +688,7 @@ fn unread(type_name: String, bad: Bad) -> RawValue {
     )
 }
 
-fn unread_reason(type_name: String, reason: UnreadReason) -> RawValue {
+fn unread_reason(type_name: Option<String>, reason: UnreadReason) -> RawValue {
     RawValue {
         kind: Some(Kind::Unread(RawUnread {
             type_name,

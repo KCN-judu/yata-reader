@@ -4,13 +4,9 @@ use super::*;
 use crate::layout::memory::{Image, RegionKind};
 use crate::layout::synthetic::{Builder, HEAP_BASE};
 
-fn never() -> bool {
-    false
-}
-
 fn runtime(b: Builder) -> (Image, Runtime) {
-    let image = b.finish();
-    let rt = discover(&image, &never).expect("a synthetic runtime is discovered");
+    let image = b.finish().expect("disjoint");
+    let rt = discover(&image).expect("a synthetic runtime is discovered");
     (image, rt)
 }
 
@@ -29,7 +25,12 @@ fn reason(v: &RawValue) -> UnreadReason {
 fn discovery_finds_every_builtin_and_the_key_shape() {
     for keys in [DictKeys::Sized, DictKeys::Logged] {
         let b = Builder::new(keys);
-        let expected = (b.ty("type"), b.ty("dict"), b.ty("str"), b.ty("NoneType"));
+        let expected = (
+            b.type_type(),
+            b.ty(Builtin::Dict),
+            b.ty(Builtin::Str),
+            b.ty(Builtin::NoneType),
+        );
         let (_, rt) = runtime(b);
         assert_eq!((rt.type_type, rt.dict, rt.str_, rt.none_type), expected);
         assert_eq!(rt.keys, keys);
@@ -47,24 +48,22 @@ fn the_engine_names_the_key_shape() {
 #[test]
 fn memory_with_no_runtime_is_a_layout_mismatch() {
     let mut m = Image::new();
-    m.add(0x1_4000_0000, RegionKind::Image, false, vec![0x5a; 4096]);
-    assert_eq!(
-        discover(&m, &never),
-        Err(LayoutError::TypeObject { found: 0 })
-    );
+    m.add(0x1_4000_0000, RegionKind::Image, false, vec![0x5a; 4096])
+        .expect("disjoint");
+    assert_eq!(discover(&m), Err(LayoutError::TypeObject { found: 0 }));
 }
 
 #[test]
 fn a_str_of_another_size_is_a_layout_mismatch() {
     let mut b = Builder::new(DictKeys::Logged);
     // 3.12 removed the wide-character field and shrank str to 64 bytes.
-    let str_type = b.ty("str");
+    let str_type = b.ty(Builtin::Str);
     b.put_u64(str_type + 32, 64);
-    let image = b.finish();
+    let image = b.finish().expect("disjoint");
     assert_eq!(
-        discover(&image, &never),
+        discover(&image),
         Err(LayoutError::Size {
-            name: "str",
+            builtin: Builtin::Str,
             basic: 64,
             item: 0
         })
@@ -72,9 +71,23 @@ fn a_str_of_another_size_is_a_layout_mismatch() {
 }
 
 #[test]
-fn a_cancelled_discovery_stops() {
-    let image = Builder::new(DictKeys::Logged).finish();
-    assert_eq!(discover(&image, &|| true), Err(LayoutError::Cancelled));
+fn a_scan_stops_at_the_checkpoints_error_and_counts_regions() {
+    let image = Builder::new(DictKeys::Logged).finish().expect("disjoint");
+    let any = |_: RegionKind, _: bool| true;
+    assert_eq!(
+        scan(&image, any, |_, _| true, || Err(Cancelled), |_| ()),
+        Err(Cancelled)
+    );
+    let mut regions = Vec::new();
+    let hits = scan(
+        &image,
+        any,
+        |_, _| false,
+        || Ok::<(), Cancelled>(()),
+        |c| regions.push((c.region, c.readable)),
+    );
+    assert_eq!(hits, Ok(vec![]));
+    assert_eq!(regions, vec![(0, true), (1, true)]);
 }
 
 #[test]
@@ -150,14 +163,15 @@ fn containers_decode_to_the_depth_limit() {
         let Kind::Mapping(outer) = kind(&d.value(map, 3)).clone() else {
             panic!("mapping")
         };
-        assert_eq!(outer.length, 1);
+        assert_eq!(outer.full_length, None);
         let entry = &outer.entries[0];
         assert_eq!(entry.key.as_ref().map(kind), Some(&Kind::Text("k".into())));
         let Some(Kind::Sequence(seq)) = entry.value.as_ref().map(kind).cloned() else {
             panic!("sequence")
         };
         assert_eq!(seq.kind(), SequenceKind::List);
-        assert_eq!(seq.length, 2);
+        assert_eq!(seq.items.len(), 2);
+        assert_eq!(seq.full_length, None);
         let Kind::Sequence(t) = kind(&seq.items[0]).clone() else {
             panic!("tuple")
         };
@@ -185,8 +199,7 @@ fn a_long_sequence_is_cut_and_keeps_its_length() {
         panic!("sequence")
     };
     assert_eq!(s.items.len(), crate::layout::limits::MAX_ITEMS);
-    assert!(s.truncated);
-    assert_eq!(s.length, 100);
+    assert_eq!(s.full_length, Some(100));
 }
 
 #[test]
@@ -213,7 +226,7 @@ fn an_unknown_kind_is_unread_with_its_type_name() {
     let Kind::Unread(u) = kind(&v) else {
         panic!("unread")
     };
-    assert_eq!(u.type_name, "SoulView");
+    assert_eq!(u.type_name.as_deref(), Some("SoulView"));
     assert_eq!(u.reason(), UnreadReason::UnknownKind);
 }
 
@@ -226,7 +239,11 @@ fn garbage_is_malformed_and_missing_memory_unreadable() {
     let (m, rt) = runtime(b);
     let d = Decoder::new(&m, &rt);
     assert_eq!(reason(&d.value(bad, 1)), UnreadReason::Malformed);
-    assert_eq!(reason(&d.value(3, 1)), UnreadReason::Malformed);
+    let Kind::Unread(u) = kind(&d.value(3, 1)).clone() else {
+        panic!("unread")
+    };
+    // Nothing is known of the type of an object whose header is not one.
+    assert_eq!((u.reason(), u.type_name), (UnreadReason::Malformed, None));
     assert_eq!(
         reason(&d.value(HEAP_BASE + (1 << 30), 1)),
         UnreadReason::Unreadable

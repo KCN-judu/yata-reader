@@ -85,8 +85,16 @@ pub trait Memory {
 /// fixtures read.
 #[derive(Debug, Clone, Default)]
 pub struct Image {
+    /// The regions, in address order, as [`Memory::regions`] returns them.
     regions: Vec<Region>,
-    bytes: Vec<Vec<u8>>,
+    /// Each region's bytes, by the region's base.
+    bytes: std::collections::BTreeMap<u64, Vec<u8>>,
+}
+
+/// A region that would overlap one the image already holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Overlap {
+    pub base: u64,
 }
 
 impl Image {
@@ -94,17 +102,31 @@ impl Image {
         Image::default()
     }
 
-    /// Add a region holding `bytes`. Regions must not overlap.
-    pub fn add(&mut self, base: u64, kind: RegionKind, writable: bool, bytes: Vec<u8>) {
+    /// Add a region holding `bytes`, unless it overlaps one already added.
+    pub fn add(
+        &mut self,
+        base: u64,
+        kind: RegionKind,
+        writable: bool,
+        bytes: Vec<u8>,
+    ) -> Result<(), Overlap> {
         let region = Region {
             base,
             size: bytes.len() as u64,
             kind,
             writable,
         };
+        if self
+            .regions
+            .iter()
+            .any(|r| r.base < region.end() && base < r.end())
+        {
+            return Err(Overlap { base });
+        }
         let at = self.regions.partition_point(|r| r.base < base);
         self.regions.insert(at, region);
-        self.bytes.insert(at, bytes);
+        self.bytes.insert(base, bytes);
+        Ok(())
     }
 }
 
@@ -118,14 +140,10 @@ impl Memory for Image {
             address,
             len: buf.len(),
         };
-        let i = self
-            .regions
-            .iter()
-            .position(|r| r.contains(address))
-            .ok_or(unreadable)?;
-        let start = usize::try_from(address - self.regions[i].base).map_err(|_| unreadable)?;
+        let (&base, bytes) = self.bytes.range(..=address).next_back().ok_or(unreadable)?;
+        let start = usize::try_from(address - base).map_err(|_| unreadable)?;
         let end = start.checked_add(buf.len()).ok_or(unreadable)?;
-        let src = self.bytes[i].get(start..end).ok_or(unreadable)?;
+        let src = bytes.get(start..end).ok_or(unreadable)?;
         buf.copy_from_slice(src);
         Ok(())
     }
@@ -216,8 +234,10 @@ mod tests {
 
     fn image() -> Image {
         let mut m = Image::new();
-        m.add(0x2_0000, RegionKind::Private, true, (0..=255).collect());
-        m.add(0x1_0000, RegionKind::Image, false, vec![7; 16]);
+        m.add(0x2_0000, RegionKind::Private, true, (0..=255).collect())
+            .expect("disjoint");
+        m.add(0x1_0000, RegionKind::Image, false, vec![7; 16])
+            .expect("disjoint");
         m
     }
 
@@ -226,6 +246,23 @@ mod tests {
         let m = image();
         let bases: Vec<u64> = m.regions().iter().map(|r| r.base).collect();
         assert_eq!(bases, vec![0x1_0000, 0x2_0000]);
+    }
+
+    #[test]
+    fn an_overlapping_region_is_refused() {
+        let mut m = image();
+        assert_eq!(
+            m.add(0x2_00f0, RegionKind::Private, true, vec![0; 32]),
+            Err(Overlap { base: 0x2_00f0 })
+        );
+        assert_eq!(
+            m.add(0x0_fff8, RegionKind::Private, true, vec![0; 16]),
+            Err(Overlap { base: 0x0_fff8 })
+        );
+        assert_eq!(
+            m.add(0x2_0100, RegionKind::Private, true, vec![0; 8]),
+            Ok(())
+        );
     }
 
     #[test]
@@ -241,7 +278,8 @@ mod tests {
     fn a_cached_read_matches_the_memory_it_caches() {
         let mut m = Image::new();
         let bytes: Vec<u8> = (0..(BLOCK as usize * 2 + 100)).map(|i| i as u8).collect();
-        m.add(0x10_0000, RegionKind::Private, true, bytes.clone());
+        m.add(0x10_0000, RegionKind::Private, true, bytes.clone())
+            .expect("disjoint");
         let c = Cached::new(m);
         let across = 0x10_0000 + BLOCK - 3;
         assert_eq!(
@@ -260,7 +298,8 @@ mod tests {
         let mut m = Image::new();
         let base = 0x7fff_0000_1000;
         let bytes: Vec<u8> = (0..3 * BLOCK as usize).map(|i| (i / 7) as u8).collect();
-        m.add(base, RegionKind::Image, true, bytes.clone());
+        m.add(base, RegionKind::Image, true, bytes.clone())
+            .expect("disjoint");
         let c = Cached::new(m);
         for at in [0, 8, BLOCK - 4, BLOCK, 2 * BLOCK + 100] {
             let i = at as usize;
