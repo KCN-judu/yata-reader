@@ -635,7 +635,7 @@ dependencies = [
 [[package]]
 name = "yata-protocol"
 version = "0.1.0"
-source = "git+https://github.com/KCN-judu/yata?rev=c6c306d0c8d2e5db273efa3a400f39c38eff08a6#c6c306d0c8d2e5db273efa3a400f39c38eff08a6"
+source = "git+https://github.com/KCN-judu/yata?rev=328fdca0a502253fa3b96698eb1cd73551449487#328fdca0a502253fa3b96698eb1cd73551449487"
 dependencies = [
  "pbjson",
  "pbjson-build",
