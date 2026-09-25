@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::process::ExitCode;
 
-use yata_protocol::probe::{Exit, ProbeErrorCode};
+use yata_protocol::failure::{Exit, ProbeCode, SessionCode};
 use yata_reader::backend::DesktopBackend;
 use yata_reader::diagnostics::Diagnostics;
 use yata_reader::export::ExportFailure;
@@ -111,7 +111,7 @@ fn export_to(out: &Path, target: Target) -> Exit {
     let e = match read {
         Ok(e) => e,
         Err(f) => {
-            let name = f.code().name().unwrap_or("probe.internal");
+            let name = f.code().name();
             diag.line(&format!("export failed: {name} {}", f.message()));
             eprintln!("{name}: {}", f.message());
             if let ExportFailure::Attach(SessionFailure {
@@ -123,7 +123,7 @@ fn export_to(out: &Path, target: Target) -> Exit {
                     eprintln!("  candidate: pid {} {}", c.pid, c.image_name);
                 }
             }
-            if f.code() == ProbeErrorCode::ElevationRequired {
+            if f.code() == ProbeCode::Session(SessionCode::ElevationRequired) {
                 eprintln!("run this command from a terminal started as administrator");
             }
             return f.exit();

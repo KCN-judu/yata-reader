@@ -61,7 +61,8 @@ pub fn install_panic_report(out: session::Outgoing) {
             session::SessionReason::Internal,
             format!("the reader panicked: {info}"),
         );
-        session::send_session_failure(&out, &f);
+        // The process exits either way; the daemon then sees the stream end.
+        let _ = session::send_session_failure(&out, &f);
         std::process::exit(i32::from(f.exit().code()));
     }));
 }

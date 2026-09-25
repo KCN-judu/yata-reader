@@ -211,13 +211,15 @@ pub fn read_souls(
             order.push(soul);
         }
     }
-    // `souls` is in address order already: pass 1 scans in address order.
+    // `souls` is in address order already: pass 1 scans regions in the order `Memory::regions`
+    // gives them, which its contract makes address order.
     order.extend((0..souls.len()).filter(|s| !key_of.contains_key(s)));
 
     let records = order
         .iter()
         .map(|soul| SoulRecord {
             observed: Some(ObservedRecord {
+                // The runtime's own name for the type: `discover` found the dict type by it.
                 type_name: Builtin::Dict.name().to_owned(),
                 container_key: key_of.get(soul).map(|&k| d.value(k, 1)),
                 entries: souls[*soul]

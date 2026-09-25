@@ -283,7 +283,7 @@ mod live {
 
 #[cfg(test)]
 mod tests {
-    use yata_protocol::probe::{Exit, ProbeErrorCode};
+    use yata_protocol::failure::{Exit, SessionCode};
 
     use super::*;
 
@@ -304,7 +304,7 @@ mod tests {
         let all = [c(4, "System"), c(10, "explorer.exe")];
         assert_eq!(select(&all, Target::Discover), Err(AttachError::NoGame));
         let f = AttachError::NoGame.failure();
-        assert_eq!(f.reason.code(), ProbeErrorCode::NotFound);
+        assert_eq!(f.code(), SessionCode::NotFound);
         assert_eq!(f.exit(), Exit::NotAttached);
         assert_eq!(f.os_error, None);
     }
@@ -378,24 +378,6 @@ mod tests {
         assert_eq!(other.os_error, Some(nonzero(1450)));
         let silent = classify_open(None, Elevation::Unelevated).failure();
         assert_eq!(silent.os_error, None);
-    }
-
-    #[test]
-    fn every_session_reason_exits_as_the_protocol_table_says() {
-        for r in [
-            SessionReason::NotFound,
-            SessionReason::Ambiguous { candidates: vec![] },
-            SessionReason::ElevationRequired,
-            SessionReason::AccessDenied,
-            SessionReason::ProcessExited,
-            SessionReason::UnsupportedEnvironment,
-            SessionReason::LayoutMismatch,
-            SessionReason::ProtocolUnsupported,
-            SessionReason::ProtocolError,
-            SessionReason::Internal,
-        ] {
-            assert_eq!(r.code().exit(), Some(r.exit()), "{r:?}");
-        }
     }
 
     #[cfg(windows)]

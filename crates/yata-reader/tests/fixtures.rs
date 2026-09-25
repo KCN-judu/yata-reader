@@ -12,10 +12,11 @@ use std::sync::{Arc, Mutex};
 
 use prost::Message;
 use yata_protocol::export;
+use yata_protocol::failure::Exit;
 use yata_protocol::frame::{self, FrameDecoder};
 use yata_protocol::probe::{
-    Exit, Handshake, PointerWidth, ProbeMessage, ReadRequest, Scope, Shutdown, TargetProcess,
-    VERSION, probe_message::Kind, reading::Records,
+    Handshake, PointerWidth, ProbeMessage, ReadRequest, Scope, Shutdown, TargetProcess, VERSION,
+    probe_message::Kind, reading::Records,
 };
 use yata_reader::backend::ImageBackend;
 use yata_reader::diagnostics::Diagnostics;

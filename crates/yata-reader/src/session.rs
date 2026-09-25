@@ -23,11 +23,13 @@ use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use prost::Message;
 use yata_protocol::discipline::{Breach, CancelEffect, Ledger, RequestId};
+pub use yata_protocol::failure::{
+    Exit, RequestCode, RequestFailure, SessionCode, SessionFailure, SessionReason,
+};
 use yata_protocol::frame::{self, FrameDecoder, FrameError};
 use yata_protocol::probe::{
-    self, Channel, Discovery, Exit, Failed, HandshakeAck, ProbeError, ProbeErrorCode, ProbeMessage,
-    Progress, ReadResult, Reading, Scope, SessionLevel, TargetProcess, failed::Subject, handshake,
-    probe_error::Detail, probe_message::Kind,
+    self, Channel, Failed, HandshakeAck, ProbeMessage, Progress, ReadResult, Reading, Scope,
+    SessionLevel, TargetProcess, failed::Subject, handshake, probe_message::Kind,
 };
 
 use crate::diagnostics::Diagnostics;
@@ -70,135 +72,11 @@ pub struct Attached {
     pub target: TargetProcess,
 }
 
-/// Why a session ends. Each reason has the code the daemon is told and the reader's exit code.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SessionReason {
-    NotFound,
-    /// More than one process could be the game; the daemon is told which.
-    Ambiguous {
-        candidates: Vec<TargetProcess>,
-    },
-    ElevationRequired,
-    AccessDenied,
-    ProcessExited,
-    UnsupportedEnvironment,
-    LayoutMismatch,
-    ProtocolUnsupported,
-    ProtocolError,
-    Internal,
-}
-
-impl SessionReason {
-    pub fn code(&self) -> ProbeErrorCode {
-        match self {
-            SessionReason::NotFound => ProbeErrorCode::NotFound,
-            SessionReason::Ambiguous { .. } => ProbeErrorCode::AmbiguousTarget,
-            SessionReason::ElevationRequired => ProbeErrorCode::ElevationRequired,
-            SessionReason::AccessDenied => ProbeErrorCode::AccessDenied,
-            SessionReason::ProcessExited => ProbeErrorCode::ProcessExited,
-            SessionReason::UnsupportedEnvironment => ProbeErrorCode::UnsupportedEnvironment,
-            SessionReason::LayoutMismatch => ProbeErrorCode::LayoutMismatch,
-            SessionReason::ProtocolUnsupported => ProbeErrorCode::ProtocolUnsupported,
-            SessionReason::ProtocolError => ProbeErrorCode::ProtocolError,
-            SessionReason::Internal => ProbeErrorCode::Internal,
-        }
-    }
-
-    /// The reader's exit code after this failure (`probe-protocol.md`, "Error codes").
-    pub fn exit(&self) -> Exit {
-        match self {
-            SessionReason::NotFound
-            | SessionReason::Ambiguous { .. }
-            | SessionReason::AccessDenied
-            | SessionReason::ProcessExited => Exit::NotAttached,
-            SessionReason::ElevationRequired => Exit::ElevationRequired,
-            SessionReason::UnsupportedEnvironment | SessionReason::LayoutMismatch => {
-                Exit::NoStrategy
-            }
-            SessionReason::ProtocolUnsupported | SessionReason::ProtocolError => Exit::Protocol,
-            SessionReason::Internal => Exit::Internal,
-        }
-    }
-}
-
-/// A failure that ends the session.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SessionFailure {
-    pub reason: SessionReason,
-    pub message: String,
-    /// The operating-system error the failure came from, when there is one.
-    pub os_error: Option<NonZeroU32>,
-}
-
-impl SessionFailure {
-    pub fn new(reason: SessionReason, message: impl Into<String>) -> SessionFailure {
-        SessionFailure {
-            reason,
-            message: message.into(),
-            os_error: None,
-        }
-    }
-
-    pub fn exit(&self) -> Exit {
-        self.reason.exit()
-    }
-
-    pub fn error(&self) -> ProbeError {
-        ProbeError {
-            code: self.reason.code().into(),
-            message: self.message.clone(),
-            os_error: self.os_error.map(NonZeroU32::get),
-            detail: match &self.reason {
-                SessionReason::Ambiguous { candidates } => Some(Detail::Discovery(Discovery {
-                    candidates: candidates.clone(),
-                })),
-                _ => None,
-            },
-        }
-    }
-}
-
-/// Why one request is answered with a failure while the session goes on.
+/// The scope a request names, as this reader parses it: a scope it reads, or one it does not.
+/// An unstated scope is a protocol error before it gets here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestReason {
-    Cancelled,
-    ScopeUnsupported,
-    NotAttached,
-}
-
-impl RequestReason {
-    pub fn code(self) -> ProbeErrorCode {
-        match self {
-            RequestReason::Cancelled => ProbeErrorCode::Cancelled,
-            RequestReason::ScopeUnsupported => ProbeErrorCode::ScopeUnsupported,
-            RequestReason::NotAttached => ProbeErrorCode::NotAttached,
-        }
-    }
-}
-
-/// A failure that answers one request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequestFailure {
-    pub reason: RequestReason,
-    pub message: String,
-}
-
-impl RequestFailure {
-    pub fn new(reason: RequestReason, message: impl Into<String>) -> RequestFailure {
-        RequestFailure {
-            reason,
-            message: message.into(),
-        }
-    }
-
-    pub fn error(&self) -> ProbeError {
-        ProbeError {
-            code: self.reason.code().into(),
-            message: self.message.clone(),
-            os_error: None,
-            detail: None,
-        }
-    }
+pub enum ReadScope {
+    Souls,
 }
 
 /// How the reader reaches the game: the desktop channel, or synthetic memory in tests.
@@ -208,7 +86,7 @@ pub trait Backend: Send + 'static {
     /// Read a scope. `progress` gets `(done, total)`; `cancelled` is checked at checkpoints.
     fn read(
         &mut self,
-        scope: Scope,
+        scope: ReadScope,
         progress: &mut dyn FnMut(u64, u64),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Reading, RequestFailure>;
@@ -229,14 +107,14 @@ pub fn send(out: &Outgoing, kind: Kind) -> std::io::Result<()> {
 }
 
 /// Tell the daemon the session is over, and why.
-pub fn send_session_failure(out: &Outgoing, f: &SessionFailure) {
-    let _ = send(
+pub fn send_session_failure(out: &Outgoing, f: &SessionFailure) -> std::io::Result<()> {
+    send(
         out,
         Kind::Failed(Failed {
             subject: Some(Subject::Session(SessionLevel {})),
-            error: Some(f.error()),
+            error: Some(f.to_wire()),
         }),
-    );
+    )
 }
 
 /// Every open request's cancel flag, beside the ledger that says which requests are open. One
@@ -257,12 +135,11 @@ pub fn run(
 ) -> Exit {
     let mut decoder = FrameDecoder::new();
     let end = |f: SessionFailure| {
-        diag.line(&format!(
-            "session failed: {} {}",
-            f.reason.code().name().unwrap_or("?"),
-            f.message
-        ));
-        send_session_failure(&out, &f);
+        diag.line(&format!("session failed: {} {}", f.name(), f.message));
+        // The exit says why the session ended whether or not the daemon still hears it.
+        if let Err(e) = send_session_failure(&out, &f) {
+            diag.line(&format!("the failure could not be sent: {e}"));
+        }
         f.exit()
     };
     let protocol_error =
@@ -305,7 +182,7 @@ pub fn run(
         "attached to {} (pid {}), engine {}",
         attached.target.image_name, attached.target.pid, attached.engine
     ));
-    if send(
+    let acked = send(
         &out,
         Kind::HandshakeAck(HandshakeAck {
             version: Some(probe::VERSION),
@@ -314,17 +191,22 @@ pub fn run(
             channel: attached.channel.into(),
             target: Some(attached.target),
         }),
-    )
-    .is_err()
-    {
-        return Exit::Clean;
+    );
+    match acked {
+        Ok(()) => {}
+        // The daemon has gone: nothing is left to serve.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Exit::Clean,
+        Err(e) => {
+            diag.line(&format!("the acknowledgement could not be sent: {e}"));
+            return Exit::Internal;
+        }
     }
 
     let requests = Arc::new(Mutex::new(Requests::default()));
     // Set once, by the worker, when its own bookkeeping fails: the exit the session then ends
     // with, whenever the main thread next looks.
     let broken: Arc<OnceLock<Exit>> = Arc::new(OnceLock::new());
-    let (jobs, queue) = mpsc::channel::<(RequestId, Scope, Arc<AtomicBool>)>();
+    let (jobs, queue) = mpsc::channel::<(RequestId, Result<ReadScope, i32>, Arc<AtomicBool>)>();
     let worker = Worker {
         out: out.clone(),
         requests: requests.clone(),
@@ -353,6 +235,15 @@ pub fn run(
                     Ok(id) => id,
                     Err(b) => return breach(b),
                 };
+                // An unstated scope breaks the protocol; a scope this reader does not know, from
+                // a newer minor version, is answered as unsupported.
+                let scope = match Scope::try_from(r.scope) {
+                    Ok(Scope::Unspecified) => {
+                        return end(protocol_error("a request with no scope".to_owned()));
+                    }
+                    Ok(Scope::Souls) => Ok(ReadScope::Souls),
+                    Err(_) => Err(r.scope),
+                };
                 let flag = Arc::new(AtomicBool::new(false));
                 let Ok(mut state) = requests.lock() else {
                     return internal("the request state is poisoned");
@@ -362,7 +253,7 @@ pub fn run(
                 }
                 state.cancels.insert(id, flag.clone());
                 drop(state);
-                if jobs.send((id, r.scope(), flag)).is_err() {
+                if jobs.send((id, scope, flag)).is_err() {
                     return internal("the worker has stopped");
                 }
             }
@@ -375,11 +266,10 @@ pub fn run(
                     return internal("the request state is poisoned");
                 };
                 match state.ledger.cancel(id) {
-                    Ok(CancelEffect::Stop) => {
-                        if let Some(f) = state.cancels.get(&id) {
-                            f.store(true, Ordering::SeqCst);
-                        }
-                    }
+                    Ok(CancelEffect::Stop) => match state.cancels.get(&id) {
+                        Some(f) => f.store(true, Ordering::SeqCst),
+                        None => return internal("an open request has no cancel flag"),
+                    },
                     Ok(CancelEffect::Ignore) => {}
                     Err(b) => return breach(b),
                 }
@@ -404,16 +294,19 @@ impl Worker {
     fn serve(
         self,
         backend: &mut impl Backend,
-        queue: mpsc::Receiver<(RequestId, Scope, Arc<AtomicBool>)>,
+        queue: mpsc::Receiver<(RequestId, Result<ReadScope, i32>, Arc<AtomicBool>)>,
     ) {
         for (id, scope, cancel) in queue {
-            let answer = if cancel.load(Ordering::SeqCst) {
-                Err(RequestFailure::new(
-                    RequestReason::Cancelled,
+            let answer = match scope {
+                _ if cancel.load(Ordering::SeqCst) => Err(RequestFailure::new(
+                    RequestCode::Cancelled,
                     "cancelled before it started",
-                ))
-            } else {
-                backend.read(
+                )),
+                Err(unknown) => Err(RequestFailure::new(
+                    RequestCode::ScopeUnsupported,
+                    format!("this reader does not read scope {unknown}"),
+                )),
+                Ok(scope) => backend.read(
                     scope,
                     &mut |done, total| {
                         let _ = send(
@@ -426,14 +319,16 @@ impl Worker {
                         );
                     },
                     &|| cancel.load(Ordering::SeqCst),
-                )
+                ),
             };
             // The ledger records the answer before it is written, so a Cancel that arrives after
             // it is ignored rather than stopping a finished request.
             if let Err(message) = self.settle(id) {
                 let f = SessionFailure::new(SessionReason::Internal, message);
+                // Set before the send, and set once: a second break keeps the first exit.
                 let _ = self.broken.set(f.exit());
-                send_session_failure(&self.out, &f);
+                // A failure that cannot be sent leaves the daemon to see the stream end.
+                let _ = send_session_failure(&self.out, &f);
                 return;
             }
             let message = match answer {
@@ -443,7 +338,7 @@ impl Worker {
                 }),
                 Err(f) => Kind::Failed(Failed {
                     subject: Some(Subject::RequestId(id.get())),
-                    error: Some(f.error()),
+                    error: Some(f.to_wire()),
                 }),
             };
             if send(&self.out, message).is_err() {

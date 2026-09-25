@@ -6,6 +6,8 @@ use yata_protocol::probe::{
     Cancel, Discover, Handshake, ProtocolVersion, ReadRequest, Shutdown, reading::Records,
 };
 
+use yata_protocol::probe::{Discovery, ProbeError, ProbeErrorCode};
+
 use super::*;
 use crate::backend::ImageBackend;
 use crate::layout::cpython::DictKeys;
@@ -30,7 +32,7 @@ impl Backend for Stub {
 
     fn read(
         &mut self,
-        _scope: Scope,
+        _scope: ReadScope,
         progress: &mut dyn FnMut(u64, u64),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Reading, RequestFailure> {
@@ -42,7 +44,7 @@ impl Backend for Stub {
             progress(done, 0);
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        Err(RequestFailure::new(RequestReason::Cancelled, "cancelled"))
+        Err(RequestFailure::new(RequestCode::Cancelled, "cancelled"))
     }
 }
 
@@ -81,9 +83,14 @@ fn image(keys: DictKeys) -> ImageBackend {
 }
 
 fn request(id: u64, scope: Scope) -> Kind {
+    request_raw(id, scope.into())
+}
+
+/// A request naming a scope by its raw wire value, which may be one this build does not know.
+fn request_raw(id: u64, scope: i32) -> Kind {
     Kind::ReadRequest(ReadRequest {
         request_id: id,
-        scope: scope.into(),
+        scope,
     })
 }
 
@@ -362,7 +369,8 @@ fn an_unknown_scope_is_answered_unsupported() {
     let (mut d, reader) = start(image(DictKeys::Logged));
     d.send(handshake(1));
     assert!(matches!(d.receive(), Some(Kind::HandshakeAck(_))));
-    d.send(request(1, Scope::Unspecified));
+    // A scope from a newer minor version.
+    d.send(request_raw(1, 99));
     let (id, e) = failure(d.answer());
     assert_eq!((id, e.code()), (Some(1), ProbeErrorCode::ScopeUnsupported));
     // A request's failure leaves the session serving.
@@ -378,4 +386,15 @@ fn a_closed_pipe_ends_the_session_cleanly() {
     let (d, reader) = start(backend);
     drop(d);
     assert_eq!(reader.join().expect("reader"), Exit::Clean);
+}
+
+#[test]
+fn a_request_with_no_scope_is_a_protocol_error() {
+    let (mut d, reader) = start(image(DictKeys::Logged));
+    d.send(handshake(1));
+    assert!(matches!(d.receive(), Some(Kind::HandshakeAck(_))));
+    d.send(request(1, Scope::Unspecified));
+    let (id, e) = failure(d.receive());
+    assert_eq!((id, e.code()), (None, ProbeErrorCode::ProtocolError));
+    assert_eq!(reader.join().expect("reader"), Exit::Protocol);
 }

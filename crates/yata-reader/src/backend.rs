@@ -2,13 +2,14 @@
 //! synthetic image for tests and fixtures. Both attach by discovering the runtime's layout and
 //! read through the same [`crate::layout`] code.
 
-use yata_protocol::probe::{Channel, Reading, Scope, TargetProcess};
+use yata_protocol::probe::{Channel, Reading, TargetProcess};
 
 use crate::layout::cpython::{Cancelled, LayoutError, Runtime, discover};
 use crate::layout::memory::{Cached, Image, Memory};
 use crate::layout::souls::read_souls;
 use crate::session::{
-    Attached, Backend, RequestFailure, RequestReason, SessionFailure, SessionReason, Target,
+    Attached, Backend, ReadScope, RequestCode, RequestFailure, SessionFailure, SessionReason,
+    Target,
 };
 
 /// Memory with its runtime found.
@@ -31,22 +32,18 @@ fn attach_to<M: Memory>(memory: M) -> Result<Attachment<M>, SessionFailure> {
 }
 
 fn not_attached() -> RequestFailure {
-    RequestFailure::new(RequestReason::NotAttached, "no game is attached")
+    RequestFailure::new(RequestCode::NotAttached, "no game is attached")
 }
 
 fn read_from<M: Memory>(
     a: &Attachment<M>,
-    scope: Scope,
+    scope: ReadScope,
     progress: &mut dyn FnMut(u64, u64),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Reading, RequestFailure> {
     match scope {
-        Scope::Souls => read_souls(&a.memory, &a.runtime, progress, cancelled)
-            .map_err(|Cancelled| RequestFailure::new(RequestReason::Cancelled, "cancelled")),
-        Scope::Unspecified => Err(RequestFailure::new(
-            RequestReason::ScopeUnsupported,
-            "this reader does not read that scope",
-        )),
+        ReadScope::Souls => read_souls(&a.memory, &a.runtime, progress, cancelled)
+            .map_err(|Cancelled| RequestFailure::new(RequestCode::Cancelled, "cancelled")),
     }
 }
 
@@ -106,7 +103,7 @@ impl Backend for ImageBackend {
 
     fn read(
         &mut self,
-        scope: Scope,
+        scope: ReadScope,
         progress: &mut dyn FnMut(u64, u64),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Reading, RequestFailure> {
@@ -150,7 +147,7 @@ impl Backend for DesktopBackend {
     #[cfg(windows)]
     fn read(
         &mut self,
-        scope: Scope,
+        scope: ReadScope,
         progress: &mut dyn FnMut(u64, u64),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Reading, RequestFailure> {
@@ -161,7 +158,7 @@ impl Backend for DesktopBackend {
     #[cfg(not(windows))]
     fn read(
         &mut self,
-        _scope: Scope,
+        _scope: ReadScope,
         _progress: &mut dyn FnMut(u64, u64),
         _cancelled: &dyn Fn() -> bool,
     ) -> Result<Reading, RequestFailure> {

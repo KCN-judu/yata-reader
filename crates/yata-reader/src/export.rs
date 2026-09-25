@@ -5,10 +5,11 @@
 use std::io::Write;
 use std::path::Path;
 
-use yata_protocol::export::{self, ExportError};
-use yata_protocol::probe::{self, Exit, ProbeErrorCode, ProbeExport, Scope};
+use yata_protocol::export::{self, Unwritable};
+use yata_protocol::failure::{Exit, ProbeCode};
+use yata_protocol::probe::{self, ProbeExport};
 
-use crate::session::{Backend, RequestFailure, SessionFailure, Target};
+use crate::session::{Backend, ReadScope, RequestFailure, SessionFailure, Target};
 
 /// Why an export was not read.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,10 +22,10 @@ pub enum ExportFailure {
 }
 
 impl ExportFailure {
-    pub fn code(&self) -> ProbeErrorCode {
+    pub fn code(&self) -> ProbeCode {
         match self {
-            ExportFailure::Attach(f) => f.reason.code(),
-            ExportFailure::Read(f) => f.reason.code(),
+            ExportFailure::Attach(f) => ProbeCode::Session(f.code()),
+            ExportFailure::Read(f) => ProbeCode::Request(f.code),
         }
     }
 
@@ -54,7 +55,7 @@ pub fn read(
 ) -> Result<ProbeExport, ExportFailure> {
     let attached = backend.attach(target).map_err(ExportFailure::Attach)?;
     let reading = backend
-        .read(Scope::Souls, progress, &|| false)
+        .read(ReadScope::Souls, progress, &|| false)
         .map_err(ExportFailure::Read)?;
     Ok(ProbeExport {
         protocol_version: Some(probe::VERSION),
@@ -70,7 +71,7 @@ pub fn read(
 /// Why an export could not be written.
 #[derive(Debug)]
 pub enum WriteError {
-    Json(ExportError),
+    Json(Unwritable),
     Io(std::io::Error),
 }
 
