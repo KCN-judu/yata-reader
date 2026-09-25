@@ -55,9 +55,10 @@ re-established by this project's own recordings.
    limits in `layout::limits`.
 4. **Records are reported verbatim.** A record is recognised by a stated rule
    and reported with every entry it holds, in the main repository's
-   `ObservedRecord`. A typed field of the record is filled only with the
-   evidence behind it, as the main repository's `probe-protocol.md`, "Evidence",
-   requires; a mapping not yet re-established stays unfilled.
+   `ObservedRecord`. A typed field of the record is filled only when the reading
+   states a `Mapping` for it with the evidence behind it, as the main
+   repository's `probe-protocol.md`, "Evidence", requires; a field not yet
+   re-established has no mapping and stays unfilled.
 5. **Parsing is safe code over a memory trait.** `layout` reads through
    `layout::memory::Memory`, which the game process, a synthetic image, and any
    test implement alike. Only `platform::windows` touches the operating system
