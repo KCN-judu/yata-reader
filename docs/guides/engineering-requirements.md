@@ -43,6 +43,18 @@ verification contract, and a different rule for `unsafe`.
   check or test here.
 - No networking code, no persistence on the user's system, no committed binary.
 
+## Modelling
+
+- The reader meets the modelling requirements of the main repository's
+  `docs/guides/engineering-requirements.md`, "Modelling": correctness by
+  construction first, one encoding per meaning, parsing at the boundary, total
+  functions that never hide a failure, and side effects isolated at the edge.
+- Bytes read from another process are parsed into typed values once. Anything
+  that fails a check is reported as unread with its reason, never as a plausible
+  value.
+- Operating-system calls sit behind safe functions with typed results, and the
+  parsers run over a memory trait that tests implement without a process.
+
 ## Code
 
 - Errors are structured values carrying typed fields, returned in the type.
